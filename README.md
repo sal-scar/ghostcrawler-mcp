@@ -111,7 +111,7 @@ Restart VS Code. GitHub Copilot will auto-connect to GhostCrawler.
 In VS Code Copilot Chat, invoke the GhostCrawler skill first:
 
 ```
-ghostcrawler https://your-target.com
+/ghostcrawler https://your-target.com
 ```
 
 This loads the pentest methodology and makes all tools available for the session.
