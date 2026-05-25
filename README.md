@@ -1,4 +1,10 @@
+<div align="center">
+
 # GhostCrawler MCP
+
+*A live MCP pentest agent. Crawls attack surfaces, fires exploits through your browser, and logs every finding to Burp Suite.*
+
+<img src="ghostcrawler-icon.png" width="300"/>
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org)
@@ -6,9 +12,8 @@
 [![Burp Suite](https://img.shields.io/badge/Burp%20Suite-MCP%20required-darkred.svg)](https://portswigger.net/burp)
 [![VS Code](https://img.shields.io/badge/VS%20Code-Copilot%20required-blueviolet.svg)](https://code.visualstudio.com)
 
-*A live MCP pentest agent. Crawls attack surfaces, fires exploits through your browser, and logs every finding to Burp Suite.*
 
----
+</div>
 
 ## What is GhostCrawler?
 
