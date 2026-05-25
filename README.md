@@ -19,11 +19,9 @@ Invoke `ghostcrawler` to activate the skill, then `pentest_active_tab`. GhostCra
 - Scans page source for hidden vulnerabilities
 - Navigates the browser live to fire real exploits
 - Logs every request to **Burp Suite Proxy History + Repeater**
-- Chains auth bypass, IDOR, stored XSS -- all visible in real time
+- Chains auth bypass, IDOR, stored XSS - all visible in real time
 
-No black boxes. Every move is live in your browser and recorded in Burp.
-
-> **Browser support:** Chromium-based browsers only (Chrome, Edge, Brave). This matches Burp Suite's embedded browser and ensures full proxy compatibility.
+Every move is live in your browser and recorded in Burp.
 
 ---
 
@@ -148,14 +146,14 @@ Run `gc_doctor` first. It checks the HTTP bridge, extension polling, roundtrip, 
 
 | Problem | Fix |
 |---------|-----|
-| `Failed to sync` | MCP server not running -- restart VS Code |
+| `Failed to sync` | MCP server not running - restart VS Code |
 | Extension not polling | Reload at `chrome://extensions` |
 | Burp not capturing | Check browser proxy is set to `127.0.0.1:8080` |
 | `pentest_active_tab` timeout | Run `gc_doctor`, reload extension, retry |
 
 ### Burp stays alive across MCP server restarts
 
-GhostCrawler ships with a tiny **burp-bridge** daemon (`burp-bridge/`) that owns the SSE connection to Burp Suite MCP. The bridge survives MCP server restarts, so Burp never sees a client disconnect -- which previously crashed Burp and lost unsaved project state.
+GhostCrawler ships with a tiny **burp-bridge** daemon (`burp-bridge/`) that owns the SSE connection to Burp Suite MCP. The bridge survives MCP server restarts, so Burp never sees a client disconnect, which previously crashed Burp and lost unsaved project state.
 
 The bridge starts automatically the first time the MCP server tries to talk to Burp. You don't need to run it manually. To check it:
 
