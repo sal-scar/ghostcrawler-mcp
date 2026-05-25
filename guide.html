@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GhostCrawler — Setup Guide</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:          #080606;
+      --card-bg:     rgba(6, 4, 4, 0.92);
+      --border:      rgba(255, 255, 255, 0.06);
+      --border-glow: rgba(251, 191, 36, 0.25);
+      --accent:      #fbbf24;
+      --accent-dim:  rgba(251, 191, 36, 0.55);
+      --accent-bg:   rgba(251, 191, 36, 0.07);
+      --text:        #d0c8c8;
+      --text-bright: #f0ecec;
+      --text-muted:  #7a7070;
+      --text-dim:    #4a4040;
+      --code-bg:     rgba(0, 0, 0, 0.55);
+      --code-text:   #a8d4b0;
+      --green:       #4ade80;
+      --radius:      14px;
+      --radius-sm:   7px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: 'Space Grotesk', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Animated scanline background ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0, 0, 0, 0.18) 2px,
+        rgba(0, 0, 0, 0.18) 4px
+      );
+    }
+
+    /* ── Subtle amber vignette glow ── */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      background: radial-gradient(
+        ellipse 80% 60% at 50% 0%,
+        rgba(251, 191, 36, 0.04) 0%,
+        transparent 70%
+      );
+    }
+
+    /* ── Page wrapper ── */
+    .page-wrap {
+      position: relative;
+      z-index: 1;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 60px 24px 80px;
+    }
+
+    /* ── Main title ── */
+    .page-title {
+      font-size: clamp(2.2rem, 5vw, 3.6rem);
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      color: #ffffff;
+      text-shadow: 0 0 40px rgba(251, 191, 36, 0.2), 0 2px 20px rgba(0,0,0,0.6);
+      margin-bottom: 52px;
+      text-align: center;
+    }
+
+    .page-title span {
+      color: var(--accent);
+    }
+
+    /* ── Divider ── */
+    .divider {
+      width: 100%;
+      max-width: 680px;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--border-glow), transparent);
+      margin: 0 auto 52px;
+    }
+
+    /* ── Steps container ── */
+    .steps {
+      width: 100%;
+      max-width: 680px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    /* ── Single step card ── */
+    .step {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px 32px;
+      box-shadow:
+        0 0 0 1px rgba(255,255,255,0.03),
+        0 12px 40px rgba(0,0,0,0.55);
+      backdrop-filter: blur(2px);
+      transition: border-color 0.2s;
+    }
+
+    .step:hover {
+      border-color: var(--border-glow);
+    }
+
+    .step-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 14px;
+    }
+
+    .step-num {
+      flex-shrink: 0;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      border: 1.5px solid var(--accent-dim);
+      background: var(--accent-bg);
+      color: var(--accent);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.78rem;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 1px;
+    }
+
+    .step-title {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--text-bright);
+      letter-spacing: 0.02em;
+      line-height: 1.4;
+    }
+
+    .step-body {
+      font-size: 0.88rem;
+      color: var(--text);
+      line-height: 1.75;
+      padding-left: 44px;
+    }
+
+    .step-body p { margin-bottom: 10px; }
+    .step-body p:last-child { margin-bottom: 0; }
+
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.82em;
+      background: var(--code-bg);
+      color: var(--code-text);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 4px;
+      padding: 1px 6px;
+    }
+
+    /* ── Command block with copy button ── */
+    .cmd-block {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: var(--code-bg);
+      border: 1px solid rgba(255,255,255,0.10);
+      border-radius: var(--radius-sm);
+      padding: 10px 14px;
+      margin: 8px 0;
+    }
+
+    .cmd-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.68rem;
+      color: var(--text-dim);
+      min-width: 62px;
+      flex-shrink: 0;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    .cmd-text {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.82rem;
+      color: var(--code-text);
+      flex: 1;
+      word-break: break-all;
+    }
+
+    .copy-btn {
+      flex-shrink: 0;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.12);
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      padding: 4px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      letter-spacing: 0.04em;
+    }
+
+    .copy-btn:hover {
+      background: rgba(251, 191, 36, 0.12);
+      border-color: var(--border-glow);
+      color: var(--accent);
+    }
+
+    .copy-btn.copied {
+      color: var(--green);
+      border-color: rgba(74, 222, 128, 0.3);
+      background: rgba(74, 222, 128, 0.07);
+    }
+
+    .step-note {
+      font-size: 0.75rem;
+      color: var(--text-dim);
+      font-family: 'JetBrains Mono', monospace;
+      margin-top: 6px;
+      padding-left: 44px;
+    }
+
+    .step-note a {
+      color: rgba(96, 165, 250, 0.8);
+      text-decoration: none;
+    }
+
+    .step-note a:hover { text-decoration: underline; }
+
+    /* ── Final command highlight ── */
+    .step--final {
+      border-color: rgba(251, 191, 36, 0.2);
+      background: rgba(251, 191, 36, 0.04);
+    }
+
+    .step--final .step-num {
+      background: rgba(251, 191, 36, 0.18);
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .step--final .cmd-text {
+      color: var(--accent);
+    }
+
+    /* ── Footer ── */
+    .footer {
+      margin-top: 56px;
+      text-align: center;
+    }
+
+    .footer-rule {
+      width: 100%;
+      max-width: 680px;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--border-glow), transparent);
+      margin: 0 auto 28px;
+    }
+
+    .footer-text {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      letter-spacing: 0.1em;
+    }
+
+    .footer-text a {
+      color: var(--accent-dim);
+      text-decoration: none;
+    }
+
+    .footer-text a:hover { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="page-wrap">
+
+    <h1 class="page-title">Setup <span>Guide</span></h1>
+
+    <div class="divider"></div>
+
+    <div class="steps">
+
+      <!-- Step 1 -->
+      <div class="step">
+        <div class="step-header">
+          <div class="step-num">01</div>
+          <div class="step-title">Run the setup script</div>
+        </div>
+        <div class="step-body">
+          <p>Open a terminal inside the <code>ghostcrawler/</code> folder. The script builds the MCP server and writes the VS Code config automatically — no manual editing needed.</p>
+        </div>
+        <div class="cmd-block">
+          <span class="cmd-label">Mac/Linux</span>
+          <span class="cmd-text" id="cmd1">./setup.sh</span>
+          <button class="copy-btn" onclick="copyCmd('cmd1', this)">Copy</button>
+        </div>
+        <div class="cmd-block">
+          <span class="cmd-label">Windows</span>
+          <span class="cmd-text" id="cmd2">powershell -ExecutionPolicy Bypass -File setup.ps1</span>
+          <button class="copy-btn" onclick="copyCmd('cmd2', this)">Copy</button>
+        </div>
+        <p class="step-note">Requires Node.js ≥ 18 — <a href="https://nodejs.org" target="_blank">nodejs.org</a></p>
+      </div>
+
+      <!-- Step 2 -->
+      <div class="step">
+        <div class="step-header">
+          <div class="step-num">02</div>
+          <div class="step-title">Load the Chrome extension</div>
+        </div>
+        <div class="step-body">
+          <p>Go to <code>chrome://extensions</code> and enable <strong style="color:var(--text-bright)">Developer Mode</strong> (top-right toggle). Click <strong style="color:var(--text-bright)">Load Unpacked</strong> and select the <code>ghostcrawler/</code> folder. Pin the icon to your toolbar.</p>
+        </div>
+      </div>
+
+      <!-- Step 3 -->
+      <div class="step">
+        <div class="step-header">
+          <div class="step-num">03</div>
+          <div class="step-title">Set up Burp Suite</div>
+        </div>
+        <div class="step-body">
+          <p>In Burp Suite go to <strong style="color:var(--text-bright)">Extensions → BApp Store</strong>, search <code>MCP</code>, and install <strong style="color:var(--text-bright)">Burp MCP</strong>. It will listen on <code>127.0.0.1:9876</code>.</p>
+          <p>Set your browser proxy to <code>127.0.0.1:8080</code> so all traffic routes through Burp.</p>
+        </div>
+      </div>
+
+      <!-- Step 4 -->
+      <div class="step">
+        <div class="step-header">
+          <div class="step-num">04</div>
+          <div class="step-title">Restart VS Code</div>
+        </div>
+        <div class="step-body">
+          <p>Fully quit and reopen VS Code. GitHub Copilot will auto-connect to the GhostCrawler MCP server on startup.</p>
+        </div>
+      </div>
+
+      <!-- Attack Mode -->
+      <div class="step">
+        <div class="step-header">
+          <div class="step-num" style="background:rgba(124,58,237,0.15);color:#a78bfa;border-color:rgba(124,58,237,0.35);">👁</div>
+          <div class="step-title">Choose your Attack Mode</div>
+        </div>
+        <div class="step-body">
+          <p style="margin-bottom:12px;">In the extension popup, toggle the <strong style="color:var(--text-bright)">Attack mode</strong> button to control how exploits are fired.</p>
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            <div style="background:rgba(0,0,0,0.3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px;">
+              <p style="font-size:13px;margin-bottom:4px;"><strong style="color:var(--text-bright);">Silent</strong> <span style="font-size:11px;color:var(--text-muted);margin-left:6px;">DEFAULT</span></p>
+              <p style="font-size:12px;color:var(--text-muted);">All attacks fire through the Burp proxy in the background. Browser stays idle. Fastest — recommended for large scans.</p>
+            </div>
+            <div style="background:rgba(124,58,237,0.07);border:1px solid rgba(124,58,237,0.25);border-radius:var(--radius-sm);padding:12px 14px;">
+              <p style="font-size:13px;margin-bottom:4px;"><strong style="color:#a78bfa;">Live 👁</strong></p>
+              <p style="font-size:12px;color:var(--text-muted);">Browser navigates to each attack URL so you can watch exploits fire in real time. Great for demos and walkthroughs.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 5 -->
+      <div class="step step--final">
+        <div class="step-header">
+          <div class="step-num">05</div>
+          <div class="step-title">Activate &amp; Hunt</div>
+        </div>
+        <div class="step-body">
+          <p>Navigate to your target in Chrome. Open GitHub Copilot Chat in VS Code and run:</p>
+        </div>
+        <div class="cmd-block">
+          <span class="cmd-label">Copilot</span>
+          <span class="cmd-text" id="cmd3">/ghostcrawler pentest_active_tab</span>
+          <button class="copy-btn" onclick="copyCmd('cmd3', this)">Copy</button>
+        </div>
+        <p class="step-note">The HUD will appear on the target page. All findings auto-log to Burp Repeater.</p>
+      </div>
+
+    </div>
+
+    <!-- ── Command Reference ── -->
+    <div class="section-header" style="margin-top:48px;">
+      <h2 class="section-title">Command Reference</h2>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:48px;">
+
+      <div style="background:var(--card-bg);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead>
+            <tr style="border-bottom:1px solid var(--border);background:rgba(251,191,36,0.05);">
+              <th style="padding:10px 16px;text-align:left;color:var(--accent);font-weight:600;white-space:nowrap;">Command &amp; Syntax</th>
+              <th style="padding:10px 16px;text-align:left;color:var(--text-muted);font-weight:500;">What it does</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:10px 16px;font-family:'JetBrains Mono',monospace;color:var(--code-text);">/ghostcrawler pentest_active_tab</td>
+              <td style="padding:10px 16px;color:var(--text);">Full OWASP Top 10 scan — source review, fingerprint, crawl, XSS/SQLi/auth. Default entry point. No arguments needed.</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:10px 16px;font-family:'JetBrains Mono',monospace;color:var(--code-text);">/ghostcrawler gc_doctor</td>
+              <td style="padding:10px 16px;color:var(--text);">Diagnose all connections: bridge, extension, Burp MCP. Run this first on any failure.</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:10px 16px;font-family:'JetBrains Mono',monospace;color:var(--code-text);">/ghostcrawler auto_crawl<br><span style="color:var(--text-muted);font-size:11px;">e.g. auto_crawl depth 2, attacks xss sqli</span></td>
+              <td style="padding:10px 16px;color:var(--text);">Crawl and attack all forms and buttons. Optionally specify <code style="font-size:11px;color:var(--accent-dim)">maxDepth</code> and which <code style="font-size:11px;color:var(--accent-dim)">attacks</code> to run.</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:10px 16px;font-family:'JetBrains Mono',monospace;color:var(--code-text);">/ghostcrawler get_attack_surface</td>
+              <td style="padding:10px 16px;color:var(--text);">Map all forms, buttons, and API endpoints on the active tab before attacking.</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:10px 16px;font-family:'JetBrains Mono',monospace;color:var(--code-text);">/ghostcrawler run_browser_plan<br><span style="color:var(--text-muted);font-size:11px;">e.g. navigate /login, type admin in #user, click submit</span></td>
+              <td style="padding:10px 16px;color:var(--text);">Execute precise browser steps: <code style="font-size:11px;color:var(--accent-dim)">navigate</code>, <code style="font-size:11px;color:var(--accent-dim)">type</code>, <code style="font-size:11px;color:var(--accent-dim)">click</code>, <code style="font-size:11px;color:var(--accent-dim)">extract_text</code>. Use for custom exploit chains.</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:10px 16px;font-family:'JetBrains Mono',monospace;color:var(--code-text);">/ghostcrawler run_attack_command<br><span style="color:var(--text-muted);font-size:11px;">e.g. xss on input[name='q'] with payload &lt;img src=x onerror=alert(1)&gt;</span></td>
+              <td style="padding:10px 16px;color:var(--text);">Fire one attack type: <code style="font-size:11px;color:var(--accent-dim)">xss</code>, <code style="font-size:11px;color:var(--accent-dim)">manual-sqli</code>, <code style="font-size:11px;color:var(--accent-dim)">default-creds</code>, <code style="font-size:11px;color:var(--accent-dim)">http-verb</code>, <code style="font-size:11px;color:var(--accent-dim)">custom-request</code>. Specify target selector and payload.</td>
+            </tr>
+            <tr style="border-bottom:1px solid var(--border);">
+              <td style="padding:10px 16px;font-family:'JetBrains Mono',monospace;color:var(--code-text);">/ghostcrawler observe_dom_changes<br><span style="color:var(--text-muted);font-size:11px;">e.g. watch #comments for 5000ms</span></td>
+              <td style="padding:10px 16px;color:var(--text);">Watch live DOM mutations. Optionally scope to a CSS <code style="font-size:11px;color:var(--accent-dim)">selector</code> and set <code style="font-size:11px;color:var(--accent-dim)">durationMs</code>. Use after XSS to confirm payload fired.</td>
+            </tr>
+            <tr>
+              <td style="padding:10px 16px;font-family:'JetBrains Mono',monospace;color:var(--code-text);">/ghostcrawler check_burp_mcp</td>
+              <td style="padding:10px 16px;color:var(--text);">Verify Burp Suite MCP connection on port 9876 and list available tools.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+
+    <!-- ── Troubleshooting ── -->
+    <div class="section-header" style="margin-top:8px;">
+      <h2 class="section-title">Troubleshooting</h2>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:14px;margin-bottom:48px;">
+
+      <div class="step">
+        <div class="step-header">
+          <div class="step-num" style="background:rgba(220,38,38,0.15);color:#f87171;border-color:rgba(220,38,38,0.3);">!</div>
+          <div class="step-title">MCP server not reachable</div>
+        </div>
+        <div class="step-body">
+          <p style="margin-bottom:10px;">The extension reports <strong>Bridge ✗</strong> or VS Code cannot connect to GhostCrawler.</p>
+          <p style="margin-bottom:8px;color:var(--text-muted);">Check if the server is already running, then restart it:</p>
+          <div class="cmd-block" style="margin-bottom:6px;">
+            <span class="cmd-label">Terminal</span>
+            <span class="cmd-text" id="ts1">lsof -ti:3200 | xargs kill -9 2>/dev/null; sleep 1; node /path/to/ghostcrawler/mcp-server/dist/index.js</span>
+            <button class="copy-btn" onclick="copyCmd('ts1',this)">Copy</button>
+          </div>
+          <p style="font-size:12px;color:var(--text-muted);">Multiple processes can hold port 3200 — the <code style="font-family:JetBrains Mono,monospace;font-size:11px;color:var(--code-text)">lsof | xargs kill</code> clears them first.</p>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-header">
+          <div class="step-num" style="background:rgba(220,38,38,0.15);color:#f87171;border-color:rgba(220,38,38,0.3);">!</div>
+          <div class="step-title">"Receiving end does not exist" / Extension error</div>
+        </div>
+        <div class="step-body">
+          <p style="margin-bottom:8px;">The content script isn't injected on the current page.</p>
+          <ol style="margin-left:18px;display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--text);">
+            <li>Navigate to <strong>chrome://extensions</strong></li>
+            <li>Find <strong>GhostCrawler</strong> and click the reload ↺ icon</li>
+            <li>Go back to your target tab and refresh it</li>
+            <li>Run <code style="font-family:JetBrains Mono,monospace;font-size:11px;color:var(--code-text)">/ghostcrawler gc_doctor</code> to verify</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-header">
+          <div class="step-num" style="background:rgba(220,38,38,0.15);color:#f87171;border-color:rgba(220,38,38,0.3);">!</div>
+          <div class="step-title">Findings not appearing in Burp</div>
+        </div>
+        <div class="step-body">
+          <p style="margin-bottom:8px;">Burp Suite MCP is not connected or the proxy isn't set up.</p>
+          <ol style="margin-left:18px;display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--text);">
+            <li>Ensure Burp Suite is open with the <strong>MCP Server extension</strong> installed and listening on <strong>port 9876</strong></li>
+            <li>Confirm Chrome is proxying through <strong>127.0.0.1:8080</strong></li>
+            <li>Run <code style="font-family:JetBrains Mono,monospace;font-size:11px;color:var(--code-text)">/ghostcrawler check_burp_mcp</code> in Copilot Chat</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-header">
+          <div class="step-num" style="background:rgba(220,38,38,0.15);color:#f87171;border-color:rgba(220,38,38,0.3);">!</div>
+          <div class="step-title">HUD shows "Complete" but AI is still working</div>
+        </div>
+        <div class="step-body">
+          <p style="margin-bottom:8px;">This was a known bug — fixed in the current version. If it reappears:</p>
+          <ol style="margin-left:18px;display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--text);">
+            <li>Rebuild the server: <code style="font-family:JetBrains Mono,monospace;font-size:11px;color:var(--code-text)">cd mcp-server && npm run build</code></li>
+            <li>Restart the server (see command above)</li>
+            <li>Reload the extension at chrome://extensions</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-header">
+          <div class="step-num" style="background:rgba(220,38,38,0.15);color:#f87171;border-color:rgba(220,38,38,0.3);">!</div>
+          <div class="step-title">"Scan stopped by user" — but you didn't stop it</div>
+        </div>
+        <div class="step-body">
+          <p style="margin-bottom:8px;">The extension heartbeat was lost during a slow page navigation. Fixed in current version (heartbeat now in background script). If it persists, reload the extension and restart the server.</p>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-header">
+          <div class="step-num" style="background:rgba(220,38,38,0.15);color:#f87171;border-color:rgba(220,38,38,0.3);">!</div>
+          <div class="step-title">Browser not moving / AI attacking via curl only</div>
+        </div>
+        <div class="step-body">
+          <p style="margin-bottom:8px;">Passive checks (headers, CORS, cookies, etc.) always run server-side — that's by design. For <strong>active attacks</strong>, toggle <strong>Attack Mode → Live 👁</strong> in the extension popup to make the browser navigate to each attack URL.</p>
+          <p style="margin-bottom:0;font-size:12px;color:var(--text-muted);">Silent mode is faster and less noisy — recommended for large scans. Live mode is better for demos.</p>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="footer">
+      <div class="footer-rule"></div>
+      <p class="footer-text">
+        GhostCrawler &mdash; authorized pentesting only &mdash;
+        <a href="https://underground-lair.com" target="_blank">underground-lair.com</a>
+      </p>
+    </div>
+
+  </div>
+  <script src="guide.js"></script>
+</body>
+</html>

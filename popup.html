@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ghostcrawler</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="panel">
+      <header class="panel__header">
+        <div>
+          <p class="eyebrow">Ghostcrawler</p>
+          <h1>Crawl. Break. Log.</h1>
+        </div>
+        <div style="display:flex;gap:6px;">
+          <button id="refreshButton" class="button" type="button">Refresh</button>
+        </div>
+      </header>
+
+      <section class="card">
+        <p id="pageUrl" class="page-url">Waiting for an active tab...</p>
+        <p id="scanMeta" class="scan-meta"></p>
+      </section>
+
+      <section class="card" id="wizardCard">
+        <div class="results-header">
+          <h2>Setup &amp; Connection</h2>
+          <span class="pill" id="wizardStatusPill" style="background:#fbbf2422;color:#fbbf24;border-color:#fbbf2444;">checking…</span>
+        </div>
+        <p class="scan-meta" style="margin:6px 0 14px;">Click <strong>↻ Verify connection</strong> to check the MCP server status, or open the full setup guide.</p>
+
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button class="button button--sm" id="wizardVerify" type="button">↻ Verify connection</button>
+          <button class="button button--sm" id="guideButton" type="button">Setup Guide</button>
+          <span id="wizardStatus" class="scan-meta" style="margin:0;"></span>
+        </div>
+
+        <div style="margin-top:14px;display:flex;align-items:center;gap:10px;">
+          <span class="scan-meta" style="margin:0;white-space:nowrap;">Attack mode:</span>
+          <button id="attackModeToggle" class="button button--sm" type="button" style="min-width:80px;">Silent</button>
+          <span id="attackModeDesc" class="scan-meta" style="margin:0;font-size:11px;color:var(--text-muted, #7a7070);">Attacks run via Burp proxy only</span>
+        </div>
+      </section>
+
+
+
+      <section class="card card--captcha" id="captchaCard" hidden>
+        <div class="results-header">
+          <h2>🔒 CAPTCHA Detected</h2>
+          <span class="pill pill--yellow">Waiting</span>
+        </div>
+        <p class="scan-meta" style="margin-bottom: 12px;">
+          Credentials have been filled in. Solve the CAPTCHA in the browser tab, then click <strong>Continue</strong> — or skip authentication testing entirely.
+        </p>
+        <div style="display: flex; gap: 8px;">
+          <button id="captchaSolvedButton" class="button" type="button" style="flex:1; background:#16a34a; border-color:#16a34a;">
+            ✅ Continue
+          </button>
+          <button id="captchaSkipButton" class="button" type="button" style="flex:1; background:#6b7280; border-color:#6b7280;">
+            ⏭ Skip Auth
+          </button>
+        </div>
+      </section>
+
+      <section class="card" id="liveScanCard" hidden>
+        <div class="results-header">
+          <h2>Live Scan Progress</h2>
+          <div class="results-header__actions">
+            <span id="scanStatus" class="pill pill--yellow">Scanning...</span>
+            <button id="stopScanButton" class="button button--sm" type="button" style="background: #dc2626; border-color: #dc2626;">Stop Scan</button>
+          </div>
+        </div>
+        <div style="margin-bottom: 12px;">
+          <div class="progress-bar-container">
+            <div id="progressBar" class="progress-bar" style="width: 0%;"></div>
+          </div>
+          <p id="currentTest" class="scan-meta" style="margin-top: 8px;">Starting scan...</p>
+        </div>
+        <div id="vulnList" style="max-height: 300px; overflow-y: auto;">
+          <p class="scan-meta" id="vulnCount">No vulnerabilities found yet</p>
+        </div>
+      </section>
+
+
+
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
