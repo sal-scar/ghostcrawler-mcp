@@ -1,4 +1,4 @@
-# GhostCrawler
+# GhostCrawler MCP
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Node.js](https://img.shields.io/badge/Node.js-18%2B-green.svg)](https://nodejs.org)
@@ -85,19 +85,19 @@ powershell -ExecutionPolicy Bypass -File setup.ps1
 
 Both scripts auto-detect Node.js, build the MCP server, and write the VS Code `mcp.json` config. No manual editing required.
 
-### 2. Load Chrome Extension
-
-1. Open `chrome://extensions`
-2. Enable **Developer Mode** (top right toggle)
-3. Click **Load Unpacked** and select the `ghostcrawler-mcp/` folder
-4. Pin the GhostCrawler icon to your toolbar
-
-### 3. Set up Burp Suite
+### 2. Set up Burp Suite
 
 1. Open Burp Suite
 2. Go to **Extensions > BApp Store**, search `MCP`, install **Burp MCP**
 3. Burp MCP listens on `127.0.0.1:9876` by default
 4. Set your browser proxy to `127.0.0.1:8080`
+
+### 3. Load Chrome Extension
+
+1. Open `chrome://extensions`
+2. Enable **Developer Mode** (top right toggle)
+3. Click **Load Unpacked** and select the `ghostcrawler-mcp/` folder
+4. Pin the GhostCrawler icon to your toolbar
 
 ### 4. Restart VS Code
 
@@ -169,12 +169,17 @@ If the bridge ever stops, the MCP server will re-spawn it on the next Burp call.
 
 ## Security Notice
 
-- Local only -- no external data transmission
+- Local only - no external data transmission
 - All traffic routed through Burp for full audit trail
 - **Use only on targets you have written authorization to test**
 
 ---
 
-## License
+## Support Me?
 
-[GPL-3.0](LICENSE) -- same license family as Metasploit, sqlmap, and Nmap.
+If GhostCrawler saved you time or helped on an engagement, feel free to buy me a coffee!
+
+- BTC: 1K8mUDMZ1Yqk5BEzenkUmsN93GFcmdx6oN
+- DOGE: DFE7BF8G4KXgoUchhm1UQNTgAx3BHoJCzy
+
+No pressure — stars and contributions are just as welcome. 🕷
