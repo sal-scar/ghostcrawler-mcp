@@ -61,7 +61,7 @@ This is a major release because core capability and behavior changed:
             | HTTP commands              | via burp-bridge
             v                            v
 +---------------------+    +------------------------------+
-|  Chrome Extension   |    |  burp-bridge daemon  :3201   |
+| Browser Extension   |    |  burp-bridge daemon  :3201   |
 |  (real browser)     |    |  survives MCP restarts       |
 |  JS executes        |    +---------------+--------------+
 |  cookies are live   |                    | SSE :9876
@@ -79,7 +79,7 @@ This is a major release because core capability and behavior changed:
 ### Prerequisites
 
 - [Node.js](https://nodejs.org) v18+
-- [Google Chrome](https://www.google.com/chrome/) (or any Chromium-based browser)
+- [Google Chrome](https://www.google.com/chrome/) or [Firefox](https://www.mozilla.org/firefox/)
 - [Burp Suite Community/Pro](https://portswigger.net/burp)
 - [VS Code](https://code.visualstudio.com) with [GitHub Copilot](https://github.com/features/copilot)
 
@@ -103,12 +103,21 @@ powershell -ExecutionPolicy Bypass -File setup.ps1
 
 Both scripts auto-detect Node.js, build the MCP server, and write the VS Code `mcp.json` config. No manual editing required.
 
-### 2. Load Chrome Extension
+### 2. Load Browser Extension
+
+Chromium path:
 
 1. Open `chrome://extensions`
 2. Enable **Developer Mode** (top right toggle)
 3. Click **Load Unpacked** and select the `ghostcrawler-mcp/` folder
 4. Pin the GhostCrawler icon to your toolbar
+
+Firefox path:
+
+1. Run `./scripts/use-manifest.sh firefox`
+2. Open `about:debugging`
+3. Go to **This Firefox** -> **Load Temporary Add-on**
+4. Select `manifest.json` from the project root
 
 ### 3. Set up Burp Suite
 
@@ -143,6 +152,22 @@ or
 auto_crawl
 ```
 
+### 7. Verify first-run health (recommended)
+
+Run these in Copilot Chat before your first full scan:
+
+```
+gc_doctor
+check_burp_mcp
+get_attack_surface
+```
+
+Expected outcome:
+
+- `gc_doctor` reports healthy bridge/extension roundtrip
+- `check_burp_mcp` confirms Burp MCP is reachable on `127.0.0.1:9876`
+- `get_attack_surface` returns forms/buttons/endpoints from the active tab
+
 ---
 
 ## MCP Tools
@@ -168,7 +193,7 @@ Run `gc_doctor` first. It checks the HTTP bridge, extension polling, roundtrip, 
 | Problem | Fix |
 |---------|-----|
 | `Failed to sync` | MCP server not running -- restart VS Code |
-| Extension not polling | Reload at `chrome://extensions` |
+| Extension not polling | Chromium: reload at `chrome://extensions`; Firefox: reload temporary add-on in `about:debugging` |
 | Burp not capturing | Check browser proxy is set to `127.0.0.1:8080` |
 | `pentest_active_tab` timeout | Run `gc_doctor`, reload extension, retry |
 
