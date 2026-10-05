@@ -119,6 +119,31 @@ Firefox path:
 3. Go to **This Firefox** -> **Load Temporary Add-on**
 4. Select `manifest.json` from the project root
 
+### 2.1 Firefox multi-account setup (Session Roles)
+
+1. Open your target in separate Firefox container tabs (example: Admin, User, Guest).
+2. In each container tab, open the GhostCrawler popup.
+3. In **Session Roles**, assign the role for that tab, then save.
+4. Repeat until each container tab has a different role.
+5. Keep those tabs open while testing.
+
+Role-based testing commands:
+
+```text
+run_access_matrix
+```
+
+Optional scoped run:
+
+```text
+run_access_matrix roles:["admin","user","guest"] methods:["GET","POST"]
+```
+
+Expected result:
+
+- The access matrix output shows status differences by role.
+- Burp requests and Repeater tabs include role tags like `[admin]`, `[user]`, `[guest]`.
+
 ### 3. Set up Burp Suite
 
 1. Open Burp Suite
@@ -194,6 +219,7 @@ Run `gc_doctor` first. It checks the HTTP bridge, extension polling, roundtrip, 
 |---------|-----|
 | `Failed to sync` | MCP server not running -- restart VS Code |
 | Extension not polling | Chromium: reload at `chrome://extensions`; Firefox: reload temporary add-on in `about:debugging` |
+| `run_access_matrix` shows only one role | Re-open each Firefox container tab, set role in popup **Session Roles**, then retry |
 | Burp not capturing | Check browser proxy is set to `127.0.0.1:8080` |
 | `pentest_active_tab` timeout | Run `gc_doctor`, reload extension, retry |
 
