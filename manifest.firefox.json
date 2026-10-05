@@ -8,7 +8,10 @@
     "tabs",
     "scripting",
     "webRequest",
-    "webNavigation"
+    "webNavigation",
+    "alarms",
+    "contextualIdentities",
+    "cookies"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -30,7 +33,7 @@
     "128": "icons/icon128.png"
   },
   "background": {
-    "service_worker": "background.js"
+    "scripts": ["background.js"]
   },
   "content_scripts": [
     {
@@ -47,7 +50,7 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "ghostcrawler@example.local",
-      "strict_min_version": "121.0"
+      "strict_min_version": "128.0"
     }
   }
 }

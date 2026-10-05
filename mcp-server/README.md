@@ -68,12 +68,14 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-### 3. Enable MCP in browser extension:
+### 3. Load extension and verify MCP link:
 
-1. Open the Ghostcrawler extension popup
-2. Scroll to "MCP Server" section
-3. Check "Enable MCP"
-4. Verify server URL: `http://127.0.0.1:3100`
+1. In repo root, choose your browser manifest:
+  - Chromium: `./scripts/use-manifest.sh chromium`
+  - Firefox: `./scripts/use-manifest.sh firefox`
+2. Load extension from repo root using generated `manifest.json`
+3. Open the GhostCrawler popup once (MCP is auto-enabled)
+4. Verify server URL is reachable (`http://127.0.0.1:3100` if you use custom HTTP_PORT)
 
 ### 4. Use from Claude/GPT:
 

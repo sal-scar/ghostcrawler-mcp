@@ -4,8 +4,61 @@
   let pollLoopRunning = false;
   let commandPollInFlight = false;
   let pollEnabled = false;
+  const SESSIONS_KEY = "ghostcrawlerSessions";
 
   const storageGet = (keys) => new Promise((resolve) => runtimeApi.storage.local.get(keys, resolve));
+
+  const getRoleContextForTab = async (tab) => {
+    try {
+      const cookieStoreId = tab?.cookieStoreId || "firefox-default";
+      const stored = await storageGet([SESSIONS_KEY]);
+      const sessions = stored?.[SESSIONS_KEY] || {};
+      const matched = sessions[cookieStoreId] || null;
+      return {
+        cookieStoreId,
+        role: matched?.role ? String(matched.role) : "",
+        containerName: matched?.containerName ? String(matched.containerName) : "",
+      };
+    } catch {
+      return { cookieStoreId: tab?.cookieStoreId || "firefox-default", role: "", containerName: "" };
+    }
+  };
+
+  const getTargetTabFromPayload = async (payload) => {
+    if (payload?.tabId) {
+      try {
+        return await runtimeApi.tabs.get(Number(payload.tabId));
+      } catch {}
+    }
+
+    const stored = await storageGet([SESSIONS_KEY]);
+    const sessions = stored?.[SESSIONS_KEY] || {};
+    let cookieStoreId = payload?.cookieStoreId ? String(payload.cookieStoreId) : "";
+
+    if (!cookieStoreId && payload?.role) {
+      const targetRole = String(payload.role).toLowerCase().trim();
+      for (const [id, meta] of Object.entries(sessions)) {
+        if (String(meta?.role || "").toLowerCase().trim() === targetRole) {
+          cookieStoreId = id;
+          break;
+        }
+      }
+    }
+
+    if (cookieStoreId) {
+      try {
+        const tabs = await runtimeApi.tabs.query({ currentWindow: true, cookieStoreId });
+        const best = tabs.find((t) => t.active) || tabs[0];
+        if (best?.id) return best;
+      } catch {
+        // cookieStoreId query unsupported on some browsers; fall back to active tab
+      }
+      return null;
+    }
+
+    const [activeTab] = await runtimeApi.tabs.query({ active: true, currentWindow: true });
+    return activeTab;
+  };
 
   // ── Wire-request capture (real browser traffic → MCP server) ──
   // Captures method, URL, headers (incl. Cookie), and body of every browser
@@ -85,22 +138,24 @@
 
   const installWireCapture = () => {
     if (!runtimeApi.webRequest || installWireCapture._installed) return;
-    installWireCapture._installed = true;
-
-    runtimeApi.webRequest.onBeforeRequest.addListener(
-      (details) => {
-        if (isLocalMcpUrl(details.url)) return;
-        wirePending.set(details.requestId, {
-          method: details.method,
-          url: details.url,
-          headers: {},
-          body: decodeRequestBody(details.requestBody),
-          ts: Date.now(),
-        });
-      },
-      { urls: ["<all_urls>"] },
-      ["requestBody"]
-    );
+    try {
+      runtimeApi.webRequest.onBeforeRequest.addListener(
+        (details) => {
+          if (isLocalMcpUrl(details.url)) return;
+          wirePending.set(details.requestId, {
+            method: details.method,
+            url: details.url,
+            headers: {},
+            body: decodeRequestBody(details.requestBody),
+            ts: Date.now(),
+          });
+        },
+        { urls: ["<all_urls>"] },
+        ["requestBody"]
+      );
+    } catch (e) {
+      console.warn("[Ghostcrawler] onBeforeRequest wire capture disabled:", String(e?.message || e));
+    }
 
     // Use extraHeaders on Chromium to include Cookie / Authorization.
     const extraOpts = ["requestHeaders"];
@@ -114,68 +169,102 @@
       }
     } catch {}
 
-    runtimeApi.webRequest.onSendHeaders.addListener(
-      (details) => {
-        if (isLocalMcpUrl(details.url)) return;
-        if (isControlChannel(details.requestHeaders)) return;
-        const entry = wirePending.get(details.requestId) || {
-          method: details.method,
-          url: details.url,
-          headers: {},
-          ts: Date.now(),
-        };
-        for (const h of details.requestHeaders || []) {
-          if (h.name && typeof h.value === "string") {
-            entry.headers[h.name] = h.value;
-          }
+    const onSendHeadersHandler = (details) => {
+      if (isLocalMcpUrl(details.url)) return;
+      if (isControlChannel(details.requestHeaders)) return;
+      const entry = wirePending.get(details.requestId) || {
+        method: details.method,
+        url: details.url,
+        headers: {},
+        ts: Date.now(),
+      };
+      for (const h of details.requestHeaders || []) {
+        if (h.name && typeof h.value === "string") {
+          entry.headers[h.name] = h.value;
         }
-        entry.method = details.method || entry.method;
-        entry.url = details.url || entry.url;
-        wirePending.set(details.requestId, entry);
-        flushWire(entry);
-      },
-      { urls: ["<all_urls>"] },
-      extraOpts
-    );
+      }
+      entry.method = details.method || entry.method;
+      entry.url = details.url || entry.url;
+      wirePending.set(details.requestId, entry);
+      flushWire(entry);
+    };
+
+    try {
+      runtimeApi.webRequest.onSendHeaders.addListener(
+        onSendHeadersHandler,
+        { urls: ["<all_urls>"] },
+        extraOpts
+      );
+    } catch (e) {
+      // Firefox may reject extraHeaders; fall back to requestHeaders only.
+      try {
+        runtimeApi.webRequest.onSendHeaders.addListener(
+          onSendHeadersHandler,
+          { urls: ["<all_urls>"] },
+          ["requestHeaders"]
+        );
+      } catch (e2) {
+        console.warn("[Ghostcrawler] onSendHeaders wire capture disabled:", String(e2?.message || e2));
+      }
+    }
 
     const cleanup = (details) => {
       wirePending.delete(details.requestId);
     };
     runtimeApi.webRequest.onCompleted.addListener(cleanup, { urls: ["<all_urls>"] });
     runtimeApi.webRequest.onErrorOccurred.addListener(cleanup, { urls: ["<all_urls>"] });
+    installWireCapture._installed = true;
   };
   // ──────────────────────────────────────────────────────────────
 
+  const isMcpEnabled = (value) => value !== false;
+
   const pollForCommands = async () => {
     const settings = await storageGet(["mcpEnabled", "mcpUrl"]);
-    if (!settings.mcpEnabled) return;
+    if (!isMcpEnabled(settings.mcpEnabled)) return;
 
-    const serverUrl = (settings.mcpUrl || "http://127.0.0.1:3200").trim();
-    if (!serverUrl) return;
-    wireServerUrl = serverUrl;
+    const configuredUrl = normalizeMcpBaseUrl(settings.mcpUrl || "");
+    const candidates = buildFallbackUrls(configuredUrl || "http://127.0.0.1:3200");
+    if (!candidates.length) return;
 
     try {
       if (commandPollInFlight) return;
       commandPollInFlight = true;
-
-      // Phase 1: fast check — is there a command ready?
-      // This is a tiny instant response (200 = yes, 204 = no).
-      // Keeps Burp history clean when no scan is running.
-      const checkRes = await fetch(`${serverUrl}/ghostcrawler/has-command`, {
-        method: "GET",
-        cache: "no-store",
-        headers: { "X-Ghostcrawler-Channel": "control" },
-      });
-
-      if (!checkRes.ok && checkRes.status !== 204) return;
+      let selectedUrl = "";
+      let checkRes = null;
+      const [activeTab] = await runtimeApi.tabs.query({ active: true, currentWindow: true });
+      const roleCtx = await getRoleContextForTab(activeTab);
+      const controlHeaders = {
+        "X-Ghostcrawler-Channel": "control",
+        ...(roleCtx.role ? { "X-Ghostcrawler-Role": roleCtx.role } : {}),
+        ...(roleCtx.cookieStoreId ? { "X-Ghostcrawler-Cookie-Store": roleCtx.cookieStoreId } : {}),
+        ...(roleCtx.containerName ? { "X-Ghostcrawler-Container": roleCtx.containerName } : {}),
+      };
+      for (const base of candidates) {
+        try {
+          const r = await fetchWithTimeout(`${base}/ghostcrawler/has-command`, {
+            method: "GET",
+            cache: "no-store",
+            headers: controlHeaders,
+          }, 5000);
+          if (!r.ok && r.status !== 204) continue;
+          selectedUrl = base;
+          checkRes = r;
+          break;
+        } catch {
+          // try the next fallback candidate
+        }
+      }
+      if (!selectedUrl || !checkRes) return;
+      wireServerUrl = selectedUrl;
       if (checkRes.status === 204) return; // nothing pending — stay quiet
 
       // Phase 2: command is ready — long-poll to get it immediately
-      const response = await fetch(`${serverUrl}/ghostcrawler/commands?waitMs=5000`, {
+      const response = await fetchWithTimeout(`${selectedUrl}/ghostcrawler/commands?waitMs=5000`, {
         method: "GET",
-        headers: { "X-Ghostcrawler-Channel": "control" },
+        headers: controlHeaders,
         cache: "no-store",
-      });
+      }, 7000);
 
       if (!response.ok) return;
 
@@ -183,7 +272,7 @@
       if (!data.command) return;
 
       // Execute the command
-      await executeCommand(data.command, serverUrl);
+      await executeCommand(data.command, selectedUrl);
     } catch (error) {
       console.warn("[Ghostcrawler] MCP polling error:", error.message);
     } finally {
@@ -230,7 +319,7 @@
 
     try {
       // Get active tab
-      const [tab] = await runtimeApi.tabs.query({ active: true, currentWindow: true });
+      const tab = await getTargetTabFromPayload(payload || {});
       if (!tab?.id) {
         throw new Error("No active tab");
       }
@@ -394,11 +483,17 @@
 
   const pushHudToTab = async (serverUrl) => {
     try {
+      const [tab] = await runtimeApi.tabs.query({ active: true, currentWindow: true });
+      if (!tab?.id) return;
+      const roleCtx = await getRoleContextForTab(tab);
       const resp = await fetch(`${serverUrl}/ghostcrawler/scan-progress`, {
         method: "GET",
         cache: "no-store",
         headers: {
           "X-Ghostcrawler-Channel": "control",
+          ...(roleCtx.role ? { "X-Ghostcrawler-Role": roleCtx.role } : {}),
+          ...(roleCtx.cookieStoreId ? { "X-Ghostcrawler-Cookie-Store": roleCtx.cookieStoreId } : {}),
+          ...(roleCtx.containerName ? { "X-Ghostcrawler-Container": roleCtx.containerName } : {}),
         },
       });
       if (!resp.ok) return;
@@ -411,8 +506,6 @@
       if (sig === lastHudPush && !alwaysPush) return;
       lastHudPush = sig;
 
-      const [tab] = await runtimeApi.tabs.query({ active: true, currentWindow: true });
-      if (!tab?.id) return;
       await sendHudMessageWithInject(tab.id, {
         type: "ghostcrawler:hud-push",
         state,
@@ -501,7 +594,11 @@
     if (pollLoopRunning) return;
     pollEnabled = true;
     pollLoopRunning = true;
-    installWireCapture();
+    try {
+      installWireCapture();
+    } catch (e) {
+      console.warn("[Ghostcrawler] wire capture init failed; continuing polling:", String(e?.message || e));
+    }
 
     // Keepalive alarm: wakes the service worker if Chrome kills it while MCP is on.
     // For unpacked extensions Chrome honours sub-minute periods; production is floored to 1 min.
@@ -534,7 +631,7 @@
       if (alarm.name !== "ghostcrawler-keepalive") return;
       // If MCP was enabled but the loop stopped (service worker was killed), restart it.
       storageGet(["mcpEnabled"]).then((settings) => {
-        if (settings.mcpEnabled && !pollLoopRunning) {
+        if (isMcpEnabled(settings.mcpEnabled) && !pollLoopRunning) {
           pollLoopRunning = false; // reset so startPolling re-enters
           startPolling();
         }
@@ -574,10 +671,25 @@
 
   // Popup asks background to sync scan data to MCP bridge.
   runtimeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === "ghostcrawler:get-role-context") {
+      (async () => {
+        try {
+          const tab = sender?.tab?.id
+            ? await runtimeApi.tabs.get(sender.tab.id)
+            : (await runtimeApi.tabs.query({ active: true, currentWindow: true }))[0];
+          const roleCtx = await getRoleContextForTab(tab);
+          sendResponse({ ok: true, roleContext: roleCtx });
+        } catch (error) {
+          sendResponse({ ok: false, error: String(error?.message || error) });
+        }
+      })();
+      return true;
+    }
+
     // Content-script keepalive ping — wakes the service worker and restarts poll loop if needed.
     if (message?.type === "ghostcrawler:ping") {
       storageGet(["mcpEnabled"]).then((settings) => {
-        if (settings.mcpEnabled && !pollLoopRunning) {
+        if (isMcpEnabled(settings.mcpEnabled) && !pollLoopRunning) {
           startPolling();
         }
         // If a HUD session was active before the service worker was killed,
@@ -739,7 +851,7 @@
   // Listen for settings changes
   runtimeApi.storage.onChanged.addListener((changes, area) => {
     if (area === "local" && changes.mcpEnabled) {
-      if (changes.mcpEnabled.newValue) {
+      if (isMcpEnabled(changes.mcpEnabled.newValue)) {
         startPolling();
       } else {
         stopPolling();
@@ -752,7 +864,7 @@
   // Check initial state and start if enabled
   storageGet(["mcpEnabled", "mcpUrl"]).then((settings) => {
     if (settings.mcpUrl) wireServerUrl = settings.mcpUrl.trim();
-    if (settings.mcpEnabled) {
+    if (isMcpEnabled(settings.mcpEnabled)) {
       startPolling();
     }
   });
@@ -760,14 +872,14 @@
   // First-run auto-enable: when extension is installed, default mcpEnabled=true
   // and mcpUrl to localhost:3200 so user can run pentest_active_tab immediately.
   try {
-    chrome.runtime.onInstalled.addListener(async (details) => {
+    runtimeApi.runtime.onInstalled.addListener(async (details) => {
       try {
         const cur = await storageGet(["mcpEnabled", "mcpUrl"]);
         const patch = {};
         if (cur.mcpEnabled === undefined) patch.mcpEnabled = true;
         if (!cur.mcpUrl) patch.mcpUrl = "http://127.0.0.1:3200";
         if (Object.keys(patch).length) {
-          await new Promise((r) => chrome.storage.local.set(patch, r));
+          await new Promise((r) => runtimeApi.storage.local.set(patch, r));
           console.log("[GhostCrawler] First-run defaults applied:", patch);
         }
         if (details.reason === "install" || details.reason === "update") {

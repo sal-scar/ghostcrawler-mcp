@@ -43,6 +43,27 @@
         </div>
       </section>
 
+      <section class="card" id="rolesCard" hidden>
+        <div class="results-header">
+          <h2>Session Roles</h2>
+          <span class="pill" id="rolesPill" style="background:#06b6d422;color:#06b6d4;border-color:#06b6d444;">Firefox containers</span>
+        </div>
+        <p class="scan-meta" style="margin:6px 0 10px;">Tag this tab's container with a role. GhostCrawler uses it to label requests per identity in Burp.</p>
+        <p id="activeContainerMeta" class="scan-meta" style="margin:0 0 10px;font-size:12px;">—</p>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <input id="roleInput" list="rolePresets" class="role-input" placeholder="role e.g. admin" autocomplete="off" />
+          <datalist id="rolePresets">
+            <option value="admin"></option>
+            <option value="user"></option>
+            <option value="guest"></option>
+            <option value="anon"></option>
+            <option value="moderator"></option>
+          </datalist>
+          <button id="roleSaveButton" class="button button--sm" type="button">Assign role</button>
+        </div>
+        <div id="sessionList" style="margin-top:12px;"></div>
+      </section>
+
 
 
       <section class="card card--captcha" id="captchaCard" hidden>

@@ -29,6 +29,19 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 info "Repo root: $REPO_DIR"
 
 # -----------------------------------------------------------
+# 1b. Generate active manifest.json (gitignored; defaults to Chromium)
+# -----------------------------------------------------------
+# The repo ships manifest.chromium.json and manifest.firefox.json but not
+# manifest.json, so the extension can't load until one is selected. Default to
+# Chromium; switch anytime with ./scripts/use-manifest.sh firefox|chromium
+if [ ! -f "$REPO_DIR/manifest.json" ]; then
+  cp "$REPO_DIR/manifest.chromium.json" "$REPO_DIR/manifest.json"
+  ok "manifest.json created (Chromium). Switch with ./scripts/use-manifest.sh firefox"
+else
+  ok "manifest.json already present — leaving as-is"
+fi
+
+# -----------------------------------------------------------
 # 2. Detect Node.js
 # -----------------------------------------------------------
 NODE_BIN=""

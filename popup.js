@@ -79,6 +79,18 @@
     applyAttackMode(attackMode || "silent");
   };
 
+  const ensureMcpEnabled = async () => {
+    const { mcpEnabled, mcpUrl } = await storageGet(["mcpEnabled", "mcpUrl"]);
+    const patch = {};
+    if (mcpEnabled !== true) patch.mcpEnabled = true;
+    if (!mcpUrl) patch.mcpUrl = MCP_BASE_URL_DEFAULT;
+    if (Object.keys(patch).length) {
+      await new Promise((resolve) => runtimeApi.storage.local.set(patch, resolve));
+    }
+    // Nudge background in case the service worker was suspended.
+    try { await runtimeApi.runtime.sendMessage({ type: "ghostcrawler:ping" }); } catch {}
+  };
+
   const applyAttackMode = (mode) => {
     const btn = document.getElementById("attackModeToggle");
     const desc = document.getElementById("attackModeDesc");
@@ -441,8 +453,152 @@
     }
   };
 
+  // ── Session Roles (Firefox Multi-Account Containers) ────────
+  // Firefox-only. Lets the user tag each container with a role (admin, user,
+  // anon, …) so GhostCrawler can label requests per identity in Burp. Stored
+  // locally keyed by cookieStoreId under `ghostcrawlerSessions`.
+  const SESSIONS_KEY = "ghostcrawlerSessions";
+  // Maps Firefox contextualIdentities color names to display hex.
+  const CONTAINER_COLORS = {
+    blue: "#37adff", turquoise: "#00c79a", green: "#51cd00", yellow: "#ffcb00",
+    orange: "#ff9f00", red: "#ff613d", pink: "#ff4bda", purple: "#af51f5",
+    toolbar: "#7c7c7d",
+  };
+
+  const rolesCard = document.getElementById("rolesCard");
+  const activeContainerMeta = document.getElementById("activeContainerMeta");
+  const roleInput = document.getElementById("roleInput");
+  const roleSaveButton = document.getElementById("roleSaveButton");
+  const sessionList = document.getElementById("sessionList");
+
+  const hasContainers = () =>
+    !!(runtimeApi.contextualIdentities && runtimeApi.contextualIdentities.query);
+
+  const loadSessions = async () => {
+    const stored = await storageGet([SESSIONS_KEY]);
+    return stored[SESSIONS_KEY] || {};
+  };
+
+  const saveSessions = (sessions) =>
+    new Promise((resolve) => runtimeApi.storage.local.set({ [SESSIONS_KEY]: sessions }, resolve));
+
+  const syncSessionsToServer = async (sessions, activeCookieStoreId) => {
+    try {
+      const serverUrl = await getMcpUrl();
+      await fetch(`${serverUrl}/ghostcrawler/session-registry`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessions: sessions || {}, activeCookieStoreId: activeCookieStoreId || null }),
+      });
+    } catch {
+      // Best-effort sync; local role mapping still works even if server is down.
+    }
+  };
+
+  // Resolves container identity for a cookieStoreId. Default/private stores
+  // have no contextualIdentity, so synthesize a label for them.
+  const getContainerInfo = async (cookieStoreId) => {
+    if (!cookieStoreId || cookieStoreId === "firefox-default") {
+      return { name: "Default (no container)", color: "#7c7c7d", cookieStoreId: "firefox-default" };
+    }
+    if (cookieStoreId === "firefox-private") {
+      return { name: "Private browsing", color: "#af51f5", cookieStoreId };
+    }
+    try {
+      const id = await runtimeApi.contextualIdentities.get(cookieStoreId);
+      return { name: id.name, color: CONTAINER_COLORS[id.color] || "#7c7c7d", cookieStoreId };
+    } catch {
+      return { name: cookieStoreId, color: "#7c7c7d", cookieStoreId };
+    }
+  };
+
+  let activeCookieStoreId = null;
+
+  const renderSessionList = async () => {
+    const sessions = await loadSessions();
+    const ids = Object.keys(sessions);
+    if (!ids.length) {
+      sessionList.innerHTML = `<p class="scan-meta" style="margin:0;font-size:12px;">No roles assigned yet.</p>`;
+      return;
+    }
+    sessionList.innerHTML = "";
+    for (const id of ids) {
+      const s = sessions[id];
+      const row = document.createElement("div");
+      row.className = "session-row" + (id === activeCookieStoreId ? " is-active" : "");
+      const safeName = (s.containerName || id);
+      const safeRole = (s.role || "");
+      row.innerHTML =
+        `<div class="session-row__meta">` +
+          `<span class="session-row__dot" style="background:${s.color || "#7c7c7d"};"></span>` +
+          `<span class="session-row__name"></span>` +
+        `</div>` +
+        `<div class="session-row__meta">` +
+          `<span class="session-row__role"></span>` +
+          `<button class="session-row__remove" type="button" title="Remove">✕</button>` +
+        `</div>`;
+      row.querySelector(".session-row__name").textContent = safeName;
+      row.querySelector(".session-row__role").textContent = safeRole;
+      row.querySelector(".session-row__remove").addEventListener("click", async () => {
+        const next = await loadSessions();
+        delete next[id];
+        await saveSessions(next);
+        await syncSessionsToServer(next, activeCookieStoreId);
+        await renderSessionList();
+        await refreshActiveContainer();
+      });
+      sessionList.appendChild(row);
+    }
+  };
+
+  const refreshActiveContainer = async () => {
+    const tab = await queryActiveTab();
+    activeCookieStoreId = tab?.cookieStoreId || "firefox-default";
+    const info = await getContainerInfo(activeCookieStoreId);
+    const sessions = await loadSessions();
+    const existing = sessions[activeCookieStoreId];
+    activeContainerMeta.innerHTML =
+      `This tab → <strong style="color:${info.color};">${info.name}</strong>` +
+      (existing?.role ? ` · role: <strong style="color:var(--accent);">${existing.role}</strong>` : ` · <em>no role</em>`);
+    // Prefill: existing role, else suggest from container name.
+    if (!roleInput.value) {
+      roleInput.value = existing?.role
+        || (info.cookieStoreId.startsWith("firefox-container") ? info.name.toLowerCase().replace(/\s+/g, "-") : "");
+    }
+  };
+
+  const assignRole = async () => {
+    const role = (roleInput.value || "").trim();
+    if (!role) return;
+    const info = await getContainerInfo(activeCookieStoreId);
+    const sessions = await loadSessions();
+    sessions[activeCookieStoreId] = {
+      role,
+      containerName: info.name,
+      color: info.color,
+      cookieStoreId: info.cookieStoreId,
+      updatedAt: Date.now(),
+    };
+    await saveSessions(sessions);
+    await syncSessionsToServer(sessions, activeCookieStoreId);
+    await refreshActiveContainer();
+    await renderSessionList();
+  };
+
+  const initSessionRoles = async () => {
+    if (!hasContainers()) return; // Chromium or containers disabled — keep card hidden.
+    rolesCard.hidden = false;
+    roleSaveButton.addEventListener("click", assignRole);
+    roleInput.addEventListener("keydown", (e) => { if (e.key === "Enter") assignRole(); });
+    await refreshActiveContainer();
+    await syncSessionsToServer(await loadSessions(), activeCookieStoreId);
+    await renderSessionList();
+  };
+
   refreshButton.addEventListener("click", refreshScan);
+  ensureMcpEnabled().catch((error) => setStatus(`MCP auto-enable failed: ${error.message}`));
   loadMCPSettings();
+  initSessionRoles().catch((error) => setStatus(`Session roles unavailable: ${error.message}`));
   refreshScan().catch((error) => setStatus(`Unable to initialize popup: ${error.message}`));
 
   // Quick Reference toggle

@@ -3,6 +3,16 @@
 
   const storageGet = (keys) => new Promise((resolve) => runtimeApi.storage.local.get(keys, resolve));
   const storageSet = (value) => new Promise((resolve) => runtimeApi.storage.local.set(value, resolve));
+  const getRoleContext = () => new Promise((resolve) => {
+    try {
+      runtimeApi.runtime.sendMessage({ type: "ghostcrawler:get-role-context" }, (resp) => {
+        if (resp?.ok && resp.roleContext) resolve(resp.roleContext);
+        else resolve({ role: "", cookieStoreId: "", containerName: "" });
+      });
+    } catch {
+      resolve({ role: "", cookieStoreId: "", containerName: "" });
+    }
+  });
 
   // Guard: skip expensive re-initialization (fetch/XHR hooks, timers) if already
   // injected into this page. Message listeners are always re-registered so the
@@ -871,17 +881,20 @@
             ? `${formAction}${params ? "?" + params : ""}`
             : formAction;
           const requestBody = formMethod === "POST" ? params : undefined;
-
-          fetch(mcpUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              method: formMethod,
-              url: requestUrl,
-              contentType: formMethod === "POST" ? "application/x-www-form-urlencoded" : undefined,
-              body: requestBody,
-            }),
-          })
+          getRoleContext()
+            .then((roleCtx) => fetch(mcpUrl, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                method: formMethod,
+                url: requestUrl,
+                contentType: formMethod === "POST" ? "application/x-www-form-urlencoded" : undefined,
+                body: requestBody,
+                role: roleCtx.role || undefined,
+                cookieStoreId: roleCtx.cookieStoreId || undefined,
+                containerName: roleCtx.containerName || undefined,
+              }),
+            }))
             .then((r) => r.json())
             .then((data) => {
               sendResponse({ ok: true, result: { action, ...data } });

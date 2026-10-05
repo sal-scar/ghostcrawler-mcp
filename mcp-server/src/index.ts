@@ -70,6 +70,19 @@ let currentAttackSurface: AttackSurface | null = null;
 let pendingCommand: Command | null = null;
 let pendingResult: any = null;
 let lastExtensionPollAt: number = 0;
+let lastExtensionRole = "";
+let lastExtensionCookieStoreId = "";
+let lastExtensionContainer = "";
+
+type SessionRoleMeta = {
+  role: string;
+  containerName?: string;
+  color?: string;
+  cookieStoreId: string;
+  updatedAt?: number;
+};
+let sessionRoleRegistry: Record<string, SessionRoleMeta> = {};
+let activeSessionCookieStoreId = "";
 
 // ── Wire-request capture from the browser extension ──
 // Stores real headers (incl. Cookie / Authorization), body, and method for
@@ -114,6 +127,30 @@ function lookupWireRequest(method: string, url: string): WireRequest | undefined
   return wireRequestStore.get(wireKey(method, url))
       ?? wireRequestByPath.get(wirePathKey(method, url));
 }
+
+function normalizeRoleName(value: string): string {
+  return String(value || "").trim().toLowerCase();
+}
+
+function getActiveRoleTag(): string {
+  if (lastExtensionRole) return lastExtensionRole;
+  const meta = activeSessionCookieStoreId ? sessionRoleRegistry[activeSessionCookieStoreId] : undefined;
+  return meta?.role ? String(meta.role) : "";
+}
+
+function extractRoleFromHeaders(headers?: Record<string, string>): string {
+  if (!headers || typeof headers !== "object") return "";
+  const role = headers["X-GhostCrawler-Role"]
+    ?? headers["x-ghostcrawler-role"]
+    ?? headers["X-Ghostcrawler-role"];
+  return role ? String(role).trim() : "";
+}
+
+function withRolePrefix(label: string, headers?: Record<string, string>): string {
+  const role = extractRoleFromHeaders(headers) || getActiveRoleTag();
+  if (!role) return label;
+  return `[${role}] ${label}`;
+}
 // ───────────────────────────────────────────────────────
 
 // Scan state tracking
@@ -147,6 +184,33 @@ let scanState: ScanProgress = {
   totalTests: 0,
   completedTests: 0,
 };
+const scanStateByCookieStore = new Map<string, ScanProgress>();
+let currentScanCookieStoreId = "";
+
+function resolveSessionCookieStoreId(req?: any): string {
+  const fromHeader = String(req?.get?.("X-Ghostcrawler-Cookie-Store") || "").trim();
+  if (fromHeader) return fromHeader;
+  const fromQuery = String(req?.query?.cookieStoreId || "").trim();
+  if (fromQuery) return fromQuery;
+  if (lastExtensionCookieStoreId) return lastExtensionCookieStoreId;
+  if (activeSessionCookieStoreId) return activeSessionCookieStoreId;
+  return "";
+}
+
+function bindScanStateToSession(cookieStoreId?: string): void {
+  const id = String(cookieStoreId || "").trim();
+  if (!id) return;
+  currentScanCookieStoreId = id;
+  scanStateByCookieStore.set(id, scanState);
+}
+
+function getScanStateForRequest(req: any): ScanProgress {
+  const id = resolveSessionCookieStoreId(req);
+  if (id && scanStateByCookieStore.has(id)) {
+    return scanStateByCookieStore.get(id)!;
+  }
+  return scanState;
+}
 
 // Deduplicated push — prevents the same type+endpoint+param appearing twice.
 // Also caps each finding type to TYPE_CAP entries so noise (e.g. "Missing
@@ -200,6 +264,11 @@ function setPhase(phase: string): void {
 
 let scanAbortFlag = false;
 let scanStoppedByUser = false; // true only when user explicitly called /scan-stop
+// Hard kill-switch: set by /scan-stop and /stop-scan, stays true until a new
+// scan is explicitly started. While true, NO command is delivered to the
+// browser extension and no navigation is queued — guarantees the Stop button
+// halts every activity, including crawls driven by AI-agent tool calls.
+let userStopActive = false;
 let _scanRunning = false; // true while executeAutoCrawl is executing — prevents duplicate scans
 let captchaResolve: ((skipped: boolean) => void) | null = null;
 let authDecisionResolve: ((decision: 'run' | 'skip' | 'manual') => void) | null = null;
@@ -216,6 +285,10 @@ let _lastLiveShowMs = 0; // timestamp of the most recent liveShow() call
 // Drainer: pick the next URL from the queue and navigate the browser.
 // Using setInterval so navigation is decoupled from scan logic entirely.
 setInterval(() => {
+  if (userStopActive) {
+    _navQueue.length = 0;
+    return;
+  }
   const url = _navQueue.shift();
   if (!url) return;
   sendExtensionCommand("browser_action", { action: "navigate", url }, 5000).catch(() => {});
@@ -283,8 +356,21 @@ app.use("/ghostcrawler", (req, res, next) => {
   const allowOrigin = origin || "*";
   res.setHeader("Access-Control-Allow-Origin", allowOrigin);
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Ghostcrawler-Channel");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Ghostcrawler-Channel, X-Ghostcrawler-Role, X-Ghostcrawler-Cookie-Store, X-Ghostcrawler-Container");
   res.setHeader("Access-Control-Max-Age", "86400");
+
+  const channel = String(req.get("X-Ghostcrawler-Channel") || "").toLowerCase();
+  if (channel === "control") {
+    const role = String(req.get("X-Ghostcrawler-Role") || "").trim();
+    const cookieStoreId = String(req.get("X-Ghostcrawler-Cookie-Store") || "").trim();
+    const containerName = String(req.get("X-Ghostcrawler-Container") || "").trim();
+    if (role) lastExtensionRole = role;
+    if (cookieStoreId) {
+      lastExtensionCookieStoreId = cookieStoreId;
+      activeSessionCookieStoreId = cookieStoreId;
+    }
+    if (containerName) lastExtensionContainer = containerName;
+  }
 
   // Respond to preflight immediately.
   if (req.method === "OPTIONS") {
@@ -309,6 +395,37 @@ app.post("/ghostcrawler/scan", (req, res) => {
   res.json({ status: "ok" });
 });
 
+app.post("/ghostcrawler/session-registry", (req, res) => {
+  const sessions = req.body?.sessions;
+  const activeCookieStoreId = req.body?.activeCookieStoreId;
+
+  if (sessions && typeof sessions === "object") {
+    sessionRoleRegistry = {};
+    for (const [cookieStoreId, meta] of Object.entries(sessions as Record<string, any>)) {
+      if (!cookieStoreId || !meta) continue;
+      const role = String(meta.role || "").trim();
+      if (!role) continue;
+      sessionRoleRegistry[cookieStoreId] = {
+        role,
+        containerName: meta.containerName ? String(meta.containerName) : undefined,
+        color: meta.color ? String(meta.color) : undefined,
+        cookieStoreId,
+        updatedAt: Number(meta.updatedAt || Date.now()),
+      };
+    }
+  }
+
+  if (activeCookieStoreId) {
+    activeSessionCookieStoreId = String(activeCookieStoreId);
+    lastExtensionCookieStoreId = String(activeCookieStoreId);
+    const activeMeta = sessionRoleRegistry[activeSessionCookieStoreId];
+    if (activeMeta?.role) lastExtensionRole = activeMeta.role;
+    if (activeMeta?.containerName) lastExtensionContainer = activeMeta.containerName;
+  }
+
+  res.json({ ok: true, roles: Object.keys(sessionRoleRegistry).length, activeCookieStoreId: activeSessionCookieStoreId || null });
+});
+
 // Extension POSTs every browser request here (real wire traffic).
 // Used by buildRawRequest to make Burp Repeater tabs match the actual
 // request the browser sent (cookies, auth headers, CSRF tokens, body).
@@ -327,10 +444,17 @@ app.post("/ghostcrawler/wire-request", (req, res) => {
 
 // Extension long-polls for commands here to reduce control-channel noise.
 app.get("/ghostcrawler/commands", async (req, res) => {
+  const channel = String(req.get("X-Ghostcrawler-Channel") || "").toLowerCase();
+  if (channel === "control") lastExtensionPollAt = Date.now();
   const waitMs = Math.max(250, Math.min(30000, Number(req.query.waitMs || 25000)));
   const start = Date.now();
 
   while (Date.now() - start < waitMs) {
+    // Hard stop: never hand a command to the browser while stopped.
+    if (userStopActive) {
+      pendingCommand = null;
+      return res.json({});
+    }
     if (pendingCommand) {
       const cmd = pendingCommand;
       pendingCommand = null;
@@ -345,7 +469,13 @@ app.get("/ghostcrawler/commands", async (req, res) => {
 // Fast non-blocking check: is there a command ready? (replaces long-poll for idle state)
 // 200 = command pending, 204 = nothing to do — no body, no long-poll, no Burp noise.
 app.get("/ghostcrawler/has-command", (req, res) => {
-  lastExtensionPollAt = Date.now();
+  const channel = String(req.get("X-Ghostcrawler-Channel") || "").toLowerCase();
+  if (channel === "control") lastExtensionPollAt = Date.now();
+  // Hard stop: drop any queued command so the browser receives nothing.
+  if (userStopActive) {
+    pendingCommand = null;
+    return res.status(204).end();
+  }
   const hasPending = !!pendingCommand;
   if (hasPending) console.error(`[Poll] has-command — pending command queued, origin=${req.headers.origin || "none"}`);
   res.status(hasPending ? 200 : 204).end();
@@ -355,13 +485,23 @@ app.get("/ghostcrawler/has-command", (req, res) => {
 // independent of the browser's proxy settings.
 // Body: { method, url, headers?, body?, contentType? }
 app.post("/ghostcrawler/proxy-request", async (req, res) => {
-  const { method = "POST", url, headers = {}, body, contentType } = req.body || {};
+  const { method = "POST", url, headers = {}, body, contentType, role, cookieStoreId, containerName } = req.body || {};
   if (!url) return res.status(400).json({ error: "Missing url" });
 
   try {
+    if (cookieStoreId) {
+      activeSessionCookieStoreId = String(cookieStoreId);
+      lastExtensionCookieStoreId = String(cookieStoreId);
+    }
+    if (role) lastExtensionRole = String(role);
+    if (containerName) lastExtensionContainer = String(containerName);
+
     const reqHeaders: Record<string, string> = {
       ...(contentType ? { "Content-Type": contentType } : {}),
       ...headers,
+      ...(role ? { "X-GhostCrawler-Role": String(role) } : {}),
+      ...(cookieStoreId ? { "X-GhostCrawler-Cookie-Store": String(cookieStoreId) } : {}),
+      ...(containerName ? { "X-GhostCrawler-Container": String(containerName) } : {}),
     };
     const result = await sendRequestThroughBurp(
       String(method).toUpperCase(),
@@ -401,6 +541,7 @@ app.post("/ghostcrawler/result", (req, res) => {
 
 // Fallback: queue one command and wait for extension result
 app.post("/ghostcrawler/command", async (req, res) => {
+  let commandId = "";
   try {
     const type = req.body?.type as string;
     const payload = req.body?.payload || {};
@@ -410,7 +551,7 @@ app.post("/ghostcrawler/command", async (req, res) => {
       return res.status(400).json({ error: "Missing required field: type" });
     }
 
-    const commandId = `${Date.now()}-http`;
+    commandId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-http`;
     pendingResult = null;
     pendingCommand = { type, payload, commandId };
 
@@ -422,6 +563,12 @@ app.post("/ghostcrawler/command", async (req, res) => {
     res.json({ ok: true, commandId, result });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  } finally {
+    // Fallback endpoint must also clear stale commands on timeout/error,
+    // otherwise has-command stays 200 forever and poisons subsequent calls.
+    if (commandId && pendingCommand?.commandId === commandId) {
+      pendingCommand = null;
+    }
   }
 });
 
@@ -439,6 +586,9 @@ async function waitForCommandResult(commandId: string, timeoutMs = 15000) {
 }
 
 async function sendExtensionCommand(type: string, payload: any = {}, timeoutMs = 15000) {
+  if (userStopActive) {
+    throw new Error("Stopped by user — start a new scan to resume");
+  }
   const commandId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   pendingResult = null;
   pendingCommand = { type, payload, commandId };
@@ -479,6 +629,7 @@ app.post("/ghostcrawler/scan-start", async (req, res) => {
 
   scanAbortFlag = false;
   scanStoppedByUser = false;
+  userStopActive = false;   // a new scan clears the hard-stop kill switch
   _navQueue.length = 0; // clear any stale nav queue from a previous scan
   resetVulnDedup();
   scanState = {
@@ -492,6 +643,7 @@ app.post("/ghostcrawler/scan-start", async (req, res) => {
     reasoning: "",
     activityLog: [],
   };
+  bindScanStateToSession(resolveSessionCookieStoreId(req));
   res.json({ status: "started" });
 
   // Run scan in background
@@ -507,6 +659,8 @@ app.post("/ghostcrawler/scan-stop", (req, res) => {
   const ua = String(req.get("User-Agent") || "");
   scanAbortFlag = true;
   scanStoppedByUser = true;
+  userStopActive = true;
+  pendingCommand = null;   // drop any command already queued for the browser
   _navQueue.length = 0; // stop any pending browser navigations immediately
   scanState.status = "stopped";
   scanState.currentTest = "Scan stopped by user";
@@ -520,6 +674,8 @@ app.post("/ghostcrawler/stop-scan", (req, res) => {
   const ua = String(req.get("User-Agent") || "");
   scanAbortFlag = true;
   scanStoppedByUser = true;
+  userStopActive = true;
+  pendingCommand = null;   // drop any command already queued for the browser
   _navQueue.length = 0; // stop any pending browser navigations immediately
   scanState.status = "stopped";
   scanState.currentTest = "Scan stopped by user";
@@ -582,7 +738,7 @@ app.post("/ghostcrawler/send-to-burp", async (req, res) => {
     const parsed = new URL(url);
     const fullPath = parsed.pathname + (parsed.search || "");
     const shortPath = fullPath.length > 36 ? fullPath.slice(0, 35) + "…" : (fullPath || "/");
-    const tabName = `${sev}${issue} - ${method} ${shortPath}`.slice(0, 120);
+    const tabName = withRolePrefix(`${sev}${issue} - ${method} ${shortPath}`, headers).slice(0, 120);
     const toolName = burpMCPToolNames.find(n => n.toLowerCase().includes("repeater")) ?? "create_repeater_tab";
 
     console.error(`[BurpMCP] HUD → Repeater: "${tabName}" host=${host}:${port} https=${useHttps}`);
@@ -619,7 +775,7 @@ app.post("/ghostcrawler/auth-decision", (req, res) => {
 
 // Get scan progress
 app.get("/ghostcrawler/scan-progress", (req, res) => {
-  res.json(scanState);
+  res.json(getScanStateForRequest(req));
 });
 
 // Push a manually-confirmed finding from the agent into the HUD + scan state.
@@ -894,7 +1050,7 @@ async function runDoctor() {
     detail: lastExtensionPollAt === 0 ? "extension has never polled" : `last poll ${Math.round(sinceLastPoll / 1000)}s ago`,
   });
   if (!polling && !suggestedFix) {
-    suggestedFix = "Open GhostCrawler popup → click ✓ Enable MCP. If already enabled, reload extension at chrome://extensions and open any tab.";
+    suggestedFix = "Open GhostCrawler popup (it auto-enables MCP on open). If polling still doesn't start, reload extension at chrome://extensions and open any target tab.";
   }
 
   // 4. Extension roundtrip (only if polling looks alive — avoid 12s wait when dead)
@@ -1067,6 +1223,7 @@ function normalizeCapturedParams(params: any): Record<string, any> {
 // the scan waiting for navigation to complete.
 // Deduped: if the same URL is already the last item in the queue, it's skipped.
 function liveShow(url: string): void {
+  if (userStopActive) return;
   if (_navQueue[_navQueue.length - 1] !== url) {
     _navQueue.push(url);
   }
@@ -1545,10 +1702,19 @@ async function sendRequestThroughBurp(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
+  const roleTaggedHeaders: Record<string, string> = { ...headers };
+  const role = extractRoleFromHeaders(headers) || getActiveRoleTag();
+  if (role && !roleTaggedHeaders["X-GhostCrawler-Role"] && !roleTaggedHeaders["x-ghostcrawler-role"]) {
+    roleTaggedHeaders["X-GhostCrawler-Role"] = role;
+  }
+  if (lastExtensionCookieStoreId && !roleTaggedHeaders["X-GhostCrawler-Cookie-Store"] && !roleTaggedHeaders["x-ghostcrawler-cookie-store"]) {
+    roleTaggedHeaders["X-GhostCrawler-Cookie-Store"] = lastExtensionCookieStoreId;
+  }
+
   try {
     const response = await fetch(url, {
       method,
-      headers,
+      headers: roleTaggedHeaders,
       body,
       signal: controller.signal,
       // @ts-ignore
@@ -1787,6 +1953,10 @@ function buildRawRequest(method: string, url: string, headers: Record<string, st
     ...capturedHeaders,
     ...headers,
   };
+  const activeRole = extractRoleFromHeaders(mergedHeaders) || getActiveRoleTag();
+  if (activeRole && !mergedHeaders["X-GhostCrawler-Role"] && !mergedHeaders["x-ghostcrawler-role"]) {
+    mergedHeaders["X-GhostCrawler-Role"] = activeRole;
+  }
   // Strip pseudo-headers some browsers expose via webRequest
   for (const k of Object.keys(mergedHeaders)) {
     if (k.startsWith(":")) delete mergedHeaders[k];
@@ -1821,8 +1991,11 @@ async function createEndpointRepeaterTab(method: string, url: string): Promise<v
   try {
     const parsed = new URL(url);
     const path = parsed.pathname + (parsed.search || "");
-    const tabLabel = `${method.toUpperCase()} ${path}`;
-    const { host, port, useHttps, request } = buildRawRequest(method.toUpperCase(), url, {});
+    const roleHeaders: Record<string, string> = {};
+    const activeRole = getActiveRoleTag();
+    if (activeRole) roleHeaders["X-GhostCrawler-Role"] = activeRole;
+    const tabLabel = withRolePrefix(`${method.toUpperCase()} ${path}`, roleHeaders);
+    const { host, port, useHttps, request } = buildRawRequest(method.toUpperCase(), url, roleHeaders);
     const toolName = burpMCPToolNames.find(n => n.toLowerCase().includes("repeater"))
       ?? "create_repeater_tab";
     console.error(`[BurpMCP] Creating tab "${tabLabel}" via tool="${toolName}" host=${host}:${port} https=${useHttps} rawLen=${request.length}`);
@@ -1906,7 +2079,7 @@ async function sendFindingToBurp(
       } catch { return url.slice(0, 36); }
     })();
     // Use full label — do NOT slice mid-word (was cutting "XSS" from "Potential XSS")
-    const tabLabel = `${label} - ${method.toUpperCase()} ${shortPathWithQuery}`.slice(0, 80);
+    const tabLabel = withRolePrefix(`${label} - ${method.toUpperCase()} ${shortPathWithQuery}`, headers).slice(0, 80);
     const { host, port, useHttps, request } = buildRawRequest(method, url, headers, body);
     const toolName = burpMCPToolNames.find(n => n.toLowerCase().includes("repeater"))
       ?? "create_repeater_tab";
@@ -3921,6 +4094,10 @@ async function checkHTMLComments(url: string): Promise<PassiveFinding[]> {
 }
 
 async function executeAutoCrawl(rawInput: AutoCrawlOptions = {}) {
+  bindScanStateToSession(lastExtensionCookieStoreId || activeSessionCookieStoreId);
+  // A fresh auto-crawl is a deliberate new scan — clear the hard-stop kill switch
+  // so command delivery to the browser resumes for this run.
+  userStopActive = false;
   // If a scan is already running, abort it first and wait for it to wind down.
   if (_scanRunning) {
     console.error("[Scan] Another scan is already running — aborting it before starting a new one");
@@ -5547,6 +5724,137 @@ async function _executeAutoCrawlInner(rawInput: AutoCrawlOptions = {}) {
   };
 }
 
+function rolePrivilegeRank(role: string): number {
+  const r = normalizeRoleName(role);
+  if (/super|root|owner/.test(r)) return 100;
+  if (/admin/.test(r)) return 90;
+  if (/manager|staff|moderator/.test(r)) return 70;
+  if (/user|member/.test(r)) return 50;
+  if (/guest|anon|public/.test(r)) return 20;
+  return 40;
+}
+
+function buildAccessMatrixEndpoints(origin: string, maxEndpoints: number): string[] {
+  const out = new Set<string>();
+  const pushSameOrigin = (u: string) => {
+    try {
+      const abs = new URL(u, origin);
+      if (abs.origin !== origin) return;
+      out.add(abs.toString());
+    } catch {}
+  };
+
+  if (currentAttackSurface?.scan?.page?.url) pushSameOrigin(currentAttackSurface.scan.page.url);
+  for (const ep of currentAttackSurface?.scan?.endpoints || []) {
+    const candidate = String((ep as any)?.url || (ep as any)?.endpoint || "");
+    if (candidate) pushSameOrigin(candidate);
+  }
+
+  ["/admin", "/dashboard", "/settings", "/profile", "/users", "/api/users", "/api/admin"].forEach((p) => {
+    try { out.add(new URL(p, origin).toString()); } catch {}
+  });
+
+  return Array.from(out).slice(0, Math.max(1, Math.min(30, maxEndpoints)));
+}
+
+async function runAccessMatrix(rawArgs: any = {}) {
+  const active = await sendExtensionCommand("get_url", {}, 10000);
+  const activeUrl = String(active?.url || active?.result?.url || "");
+  if (!/^https?:/i.test(activeUrl)) {
+    throw new Error(`Active tab URL is not a valid web target: ${activeUrl || "(empty)"}`);
+  }
+  const origin = new URL(activeUrl).origin;
+
+  const roleFilter = Array.isArray(rawArgs?.roles)
+    ? new Set(rawArgs.roles.map((r: any) => normalizeRoleName(String(r))))
+    : null;
+
+  const sessions = Object.values(sessionRoleRegistry)
+    .filter((s) => !!s?.role && !!s?.cookieStoreId)
+    .filter((s) => !roleFilter || roleFilter.has(normalizeRoleName(s.role)))
+    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+  const seenRole = new Set<string>();
+  const roleTargets = sessions.filter((s) => {
+    const r = normalizeRoleName(s.role);
+    if (seenRole.has(r)) return false;
+    seenRole.add(r);
+    return true;
+  });
+
+  if (roleTargets.length < 2) {
+    throw new Error("Access matrix needs at least 2 assigned roles. Set Session Roles in popup first.");
+  }
+
+  const methods = Array.isArray(rawArgs?.methods) && rawArgs.methods.length
+    ? rawArgs.methods.map((m: any) => String(m).toUpperCase())
+    : ["GET"];
+  const endpoints = buildAccessMatrixEndpoints(origin, Number(rawArgs?.maxEndpoints || 12));
+  if (!endpoints.length) throw new Error("No same-origin endpoints available for access matrix.");
+
+  const matrix: any[] = [];
+  const findings: any[] = [];
+
+  for (const url of endpoints) {
+    for (const method of methods) {
+      const statuses: Record<string, number> = {};
+      for (const target of roleTargets) {
+        try {
+          const resp = await sendExtensionCommand("browser_action", {
+            action: "request",
+            url,
+            method,
+            headers: {
+              "X-GhostCrawler-Role": target.role,
+            },
+            cookieStoreId: target.cookieStoreId,
+            role: target.role,
+          }, 15000);
+          statuses[target.role] = Number(resp?.status || resp?.result?.status || 0);
+        } catch {
+          statuses[target.role] = 0;
+        }
+      }
+
+      matrix.push({ method, url, statuses });
+      const uniqueStatuses = Array.from(new Set(Object.values(statuses)));
+      if (uniqueStatuses.length > 1) {
+        findings.push({
+          type: "Differential Access Response",
+          severity: "Medium",
+          endpoint: `${method} ${url}`,
+          evidence: JSON.stringify(statuses),
+        });
+      }
+
+      const path = new URL(url).pathname.toLowerCase();
+      const sensitivePath = /(admin|manage|settings|users|billing|internal)/.test(path);
+      if (sensitivePath) {
+        for (const [role, status] of Object.entries(statuses)) {
+          if (rolePrivilegeRank(role) < 70 && status >= 200 && status < 300) {
+            findings.push({
+              type: "Potential BFLA/BOLA",
+              severity: "High",
+              endpoint: `${method} ${url}`,
+              param: role,
+              evidence: `${role} received HTTP ${status} on sensitive path ${path}`,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    targetOrigin: origin,
+    roles: roleTargets.map((s) => ({ role: s.role, cookieStoreId: s.cookieStoreId, containerName: s.containerName || "" })),
+    testedEndpoints: matrix.length,
+    matrix,
+    findings,
+  };
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // MCP Server Setup
 // ══════════════════════════════════════════════════════════════════════
@@ -5697,6 +6005,29 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: "run_access_matrix",
+        description: "Run differential authorization checks across session roles (Firefox containers). Tests same-origin endpoints per role and reports status-code drift / possible BOLA-BFLA.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            roles: {
+              type: "array",
+              items: { type: "string" },
+              description: "Optional role filter, e.g. [\"admin\",\"user\",\"guest\"]",
+            },
+            methods: {
+              type: "array",
+              items: { type: "string", enum: ["GET", "POST"] },
+              description: "HTTP methods to test (default: GET)",
+            },
+            maxEndpoints: {
+              type: "number",
+              description: "Max same-origin endpoints to test (default: 12, max: 30)",
+            },
+          },
+        },
+      },
+      {
         name: "check_burp_mcp",
         description: "Verify Burp Suite MCP connection on :9876 and list available tools.",
         inputSchema: { type: "object", properties: {} },
@@ -5756,7 +6087,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   // When the AI calls any tool after a scan has finished, flip the HUD status
   // to "agent-active" so the poll interval stays alive and the user can watch
   // the AI's follow-up work (manual exploits, browser plans, etc.) in real time.
-  const SCAN_TOOLS = new Set(["pentest_active_tab", "auto_crawl", "gc_doctor", "check_burp_mcp"]);
+  const SCAN_TOOLS = new Set(["pentest_active_tab", "auto_crawl", "run_access_matrix", "gc_doctor", "check_burp_mcp"]);
   if (!SCAN_TOOLS.has(name) && (scanState.status === "completed" || scanState.status === "stopped")) {
     scanState.status = "agent-active";
   }
@@ -5767,6 +6098,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     run_attack_command:    "Firing targeted attack",
     get_attack_surface:    "Mapping attack surface",
     observe_dom_changes:   "Observing DOM for mutations",
+    run_access_matrix:     "Running multi-role access matrix",
     start_live_scan:       "Starting live scan",
     get_pending_probe:     "Checking pending probe",
     submit_probe_decision: "Submitting probe decision",
@@ -5806,6 +6138,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         console.error(`[MCP Tool] start_live_scan: ${action}`);
 
         scanAbortFlag = false;
+        userStopActive = false;   // explicit new scan clears the hard-stop kill switch
         resetVulnDedup();
         scanState = {
           status: "scanning",
@@ -5818,6 +6151,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           reasoning: "",
           activityLog: [],
         };
+        bindScanStateToSession(lastExtensionCookieStoreId || activeSessionCookieStoreId);
 
         // STEP 1: First, capture the page by sending scan command
         pendingCommand = {
@@ -5894,6 +6228,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const input = (args as any) || {};
         const action = input.action as string;
 
+        if (userStopActive) {
+          return {
+            content: [{ type: "text", text: "⛔ Stopped by user. Start a new scan to resume browser actions." }],
+            isError: true,
+          };
+        }
+
         if (!action) {
           return {
             content: [{ type: "text", text: "❌ Missing required field: action" }],
@@ -5948,6 +6289,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const input = (args as any) || {};
         const steps = Array.isArray(input.steps) ? input.steps : [];
         const stepDelayMs = Number(input.stepDelayMs ?? 400);
+
+        if (userStopActive) {
+          return {
+            content: [{ type: "text", text: "⛔ Stopped by user. Start a new scan to resume browser plans." }],
+            isError: true,
+          };
+        }
 
         if (!steps.length) {
           return {
@@ -6011,6 +6359,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const action = rawAction.replaceAll("_", "-");
 
           scanAbortFlag = false;
+          userStopActive = false;   // explicit new scan clears the hard-stop kill switch
           resetVulnDedup();
           scanState = {
             status: "scanning",
@@ -6023,6 +6372,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             reasoning: "",
             activityLog: [],
           };
+          bindScanStateToSession(lastExtensionCookieStoreId || activeSessionCookieStoreId);
 
           pendingCommand = {
             type: "scan",
@@ -6104,6 +6454,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const durationMs = Math.max(500, Number(input.durationMs ?? 5000));
         const selector = input.selector as string | undefined;
         const maxEvents = Math.max(20, Number(input.maxEvents ?? 200));
+
+        if (userStopActive) {
+          return {
+            content: [{ type: "text", text: "⛔ Stopped by user. Start a new scan to resume DOM observation." }],
+            isError: true,
+          };
+        }
 
         const startCommandId = `${Date.now()}-dom-start`;
         pendingResult = null;
@@ -6482,8 +6839,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // 1. Auto-detect URL from active tab
         let activeUrl = "";
         try {
-          const r = await sendExtensionCommand("get_url", {}, 12000);
-          activeUrl = String(r?.url || r?.result?.url || "");
+          let lastErr: any = null;
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+              const r = await sendExtensionCommand("get_url", {}, 8000);
+              activeUrl = String(r?.url || r?.result?.url || "");
+              if (activeUrl) break;
+            } catch (e: any) {
+              lastErr = e;
+              if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 350));
+            }
+          }
+          if (!activeUrl) throw lastErr || new Error("Timeout waiting for get_url");
         } catch (e: any) {
           // Auto-run doctor so the user sees the actual broken layer
           const diag = await runDoctor();
@@ -6543,6 +6910,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             preset,
             message: "Automated crawl is running in the background — do NOT call scan-progress or any polling endpoints. Your job now is to execute the full manual pentest workflow using the available tools: (1) call get_attack_surface to map forms, buttons, and API endpoints; (2) review page source for hidden fields, JS sinks, hardcoded secrets; (3) run_browser_plan to test auth bypass via hidden fields or localStorage; (4) run_browser_plan to enumerate IDOR (id=1,2,3); (5) run_attack_command xss on high-value inputs; (6) observe_dom_changes to confirm XSS; (7) run_attack_command default-creds on login forms; (8) check /robots.txt, /.git, /admin for misconfigs. Work through each step and report findings as you go.",
           }, null, 2) }],
+        };
+      }
+
+      case "run_access_matrix": {
+        const result = await runAccessMatrix(args || {});
+        return {
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
       }
 

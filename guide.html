@@ -333,10 +333,12 @@
       <div class="step">
         <div class="step-header">
           <div class="step-num">02</div>
-          <div class="step-title">Load the Chrome extension</div>
+          <div class="step-title">Load the browser extension</div>
         </div>
         <div class="step-body">
-          <p>Go to <code>chrome://extensions</code> and enable <strong style="color:var(--text-bright)">Developer Mode</strong> (top-right toggle). Click <strong style="color:var(--text-bright)">Load Unpacked</strong> and select the <code>ghostcrawler/</code> folder. Pin the icon to your toolbar.</p>
+          <p><strong style="color:var(--text-bright)">Chrome / Edge / Brave:</strong> run <code>./scripts/use-manifest.sh chromium</code> first, then go to <code>chrome://extensions</code>, enable <strong style="color:var(--text-bright)">Developer Mode</strong> (top-right toggle), click <strong style="color:var(--text-bright)">Load Unpacked</strong>, and select the <code>ghostcrawler/</code> folder. Pin the icon to your toolbar.</p>
+          <p style="margin-top:10px;"><strong style="color:var(--text-bright)">Firefox (128+):</strong> run <code>./scripts/use-manifest.sh firefox</code> first, then go to <code>about:debugging#/runtime/this-firefox</code>, click <strong style="color:var(--text-bright)">Load Temporary Add-on…</strong>, and select the <code>manifest.json</code> inside the <code>ghostcrawler/</code> folder.</p>
+          <p class="step-note">The <code>use-manifest.sh</code> script swaps <code>manifest.json</code> to the correct variant for each browser. Firefox requires version 128 or newer.</p>
         </div>
       </div>
 
@@ -349,6 +351,7 @@
         <div class="step-body">
           <p>In Burp Suite go to <strong style="color:var(--text-bright)">Extensions → BApp Store</strong>, search <code>MCP</code>, and install <strong style="color:var(--text-bright)">Burp MCP</strong>. It will listen on <code>127.0.0.1:9876</code>.</p>
           <p>Set your browser proxy to <code>127.0.0.1:8080</code> so all traffic routes through Burp.</p>
+          <p class="step-note"><strong style="color:var(--text-bright)">Keep Burp history clean:</strong> add <code>127.0.0.1:3200</code> and <code>127.0.0.1:3201</code> (and <code>localhost</code>) to your proxy's <strong>bypass / "do not proxy"</strong> list. These are GhostCrawler's own control-channel ports — the extension polls them every ~2s, so leaving them proxied floods HTTP history even when no scan is running. Only real target traffic should go through Burp.</p>
         </div>
       </div>
 
@@ -489,7 +492,7 @@
         <div class="step-body">
           <p style="margin-bottom:8px;">The content script isn't injected on the current page.</p>
           <ol style="margin-left:18px;display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--text);">
-            <li>Navigate to <strong>chrome://extensions</strong></li>
+            <li>Navigate to <strong>chrome://extensions</strong> (or <strong>about:debugging</strong> in Firefox)</li>
             <li>Find <strong>GhostCrawler</strong> and click the reload ↺ icon</li>
             <li>Go back to your target tab and refresh it</li>
             <li>Run <code style="font-family:JetBrains Mono,monospace;font-size:11px;color:var(--code-text)">/ghostcrawler gc_doctor</code> to verify</li>
@@ -515,6 +518,21 @@
       <div class="step">
         <div class="step-header">
           <div class="step-num" style="background:rgba(220,38,38,0.15);color:#f87171;border-color:rgba(220,38,38,0.3);">!</div>
+          <div class="step-title">GhostCrawler requests flooding Burp history (no scan running)</div>
+        </div>
+        <div class="step-body">
+          <p style="margin-bottom:8px;">Repeated <code>127.0.0.1:3200/ghostcrawler/has-command</code> (and <code>heartbeat</code> / <code>scan-progress</code>) lines are the extension's control channel polling the local MCP server every ~2s. They only pollute Burp when loopback traffic is routed through the proxy.</p>
+          <ol style="margin-left:18px;display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--text);">
+            <li>Add <strong>127.0.0.1:3200</strong>, <strong>127.0.0.1:3201</strong> and <strong>localhost</strong> to your proxy's <strong>bypass / "do not proxy"</strong> list (FoxyProxy pattern or system proxy exceptions)</li>
+            <li>Or in Burp, use <strong>Proxy → HTTP history → filter</strong> to hide host <strong>127.0.0.1:3200</strong></li>
+            <li>Real target traffic still routes through Burp — only the local control channel is excluded</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="step">
+        <div class="step-header">
+          <div class="step-num" style="background:rgba(220,38,38,0.15);color:#f87171;border-color:rgba(220,38,38,0.3);">!</div>
           <div class="step-title">HUD shows "Complete" but AI is still working</div>
         </div>
         <div class="step-body">
@@ -522,7 +540,7 @@
           <ol style="margin-left:18px;display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--text);">
             <li>Rebuild the server: <code style="font-family:JetBrains Mono,monospace;font-size:11px;color:var(--code-text)">cd mcp-server && npm run build</code></li>
             <li>Restart the server (see command above)</li>
-            <li>Reload the extension at chrome://extensions</li>
+            <li>Reload the extension at chrome://extensions (or about:debugging in Firefox)</li>
           </ol>
         </div>
       </div>

@@ -302,6 +302,26 @@ run_browser_plan:
   -> page loads without redirect = no server session check (Critical)
 ```
 
+### A02 - Cryptographic Failures
+
+Tool action:
+```
+custom-request  -> HEAD/GET target, read Set-Cookie header
+observe_dom_changes  -> check localStorage/sessionStorage for tokens in plaintext
+navigate  -> http:// version of the target (check for no forced HTTPS redirect)
+```
+
+Manual analysis (no tool call -- read the captured response yourself):
+```
+Set-Cookie missing Secure           -> cookie sent over plain HTTP = High
+Set-Cookie missing HttpOnly         -> cookie readable by JS, worsens any XSS = Medium
+JWT found in Phase 0 review         -> decode at jwt.io manually, check:
+                                        "alg":"none"      -> auth bypass, Critical
+                                        "alg":"HS256" + weak/guessable secret -> High
+localStorage.getItem('token')       -> plaintext sensitive data client-side = Medium
+Mixed content (https page loading http:// resources) -> Medium
+```
+
 ### A05 - Security Misconfiguration
 ```
 run_attack_command: default-creds
@@ -323,6 +343,47 @@ Session not invalidated on logout:
 Token in URL:
   look for /reset?token=abc123
   -> token in URL = exposed in browser history/referrer = High
+```
+
+### A08 - Software and Data Integrity Failures
+
+Tool action:
+```
+get_attack_surface  -> list <script src="..."> pulled from third-party/CDN domains
+custom-request  -> POST to any file-upload or import/deserialize endpoint with a
+                   benign marker payload, read back the response
+```
+
+Manual analysis (read Phase 0 HTML source yourself):
+```
+<script src="https://cdn.example.com/lib.js">  without integrity="sha384-..."
+                                     -> no SRI, Medium (High if script runs in auth context)
+Response body looks like serialized object:
+  "rO0AB..."                        -> Java native serialization = flag for RCE test
+  "\x80\x04\x95..." / "(dp0\n"      -> Python pickle = flag for RCE test
+  base64 blob in a hidden field     -> decode and inspect before resubmitting
+Auto-update / plugin install endpoint with no signature check -> High
+CI/CD config exposed (/.github, /Jenkinsfile, /.gitlab-ci.yml) -> Medium, review for secrets
+```
+
+### A09 - Security Logging and Monitoring Failures
+
+Tool action:
+```
+run_browser_plan  -> submit wrong password 10-15x in a row on the login form
+custom-request    -> repeat a sensitive action (password reset) rapidly
+```
+
+Manual analysis (observe behavior across the repeated attempts yourself):
+```
+No CAPTCHA, delay, or account lockout after repeated failed logins -> Medium
+                                     (High if combined with no rate limit = brute-forceable)
+Error messages reveal whether username exists ("user not found" vs "wrong password")
+                                     -> Low/Medium, aids credential stuffing
+Verbose stack trace / debug page on error (seen in Phase 1 Step 3)
+                                     -> Low on its own, but confirms no error monitoring in place
+No visible audit trail after a state-changing action (nothing in a visible admin log) -> Info/Low,
+                                     note in report as a monitoring gap, not an exploit
 ```
 
 ### A10 - SSRF
@@ -398,6 +459,12 @@ code rules, then a **final severity** is gated by evidence confidence.
 | Hardcoded AWS key (AKIA...) | **Critical** | — |
 | Hardcoded JWT | **High** | **Critical** if not expired and grants elevated access |
 | Confirmed CVE exploit | **Critical** | — |
+| Cookie missing Secure/HttpOnly | **Medium** | **High** if combined with XSS (session theft becomes trivial) |
+| JWT alg:none accepted | **Critical** | — |
+| Missing SRI on third-party script | **Medium** | **High** if script executes in an authenticated context |
+| Insecure deserialization (confirmed RCE) | **Critical** | — |
+| No lockout/rate-limit on login | **Medium** | **High** if also missing CAPTCHA and account takeover demonstrated |
+| Verbose error / stack trace disclosure | **Low** | **Medium** if it reveals internal paths or credentials |
 
 ### Escalation Rules (summary)
 

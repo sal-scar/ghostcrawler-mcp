@@ -21,6 +21,17 @@ $RepoDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Write-Host "[*] Repo root: $RepoDir" -ForegroundColor Cyan
 
 # -----------------------------------------------------------
+# 1b. Generate active manifest.json (gitignored; defaults to Chromium)
+# -----------------------------------------------------------
+$ManifestPath = Join-Path $RepoDir "manifest.json"
+if (-not (Test-Path $ManifestPath)) {
+    Copy-Item (Join-Path $RepoDir "manifest.chromium.json") $ManifestPath
+    Write-Host "[+] manifest.json created (Chromium). Switch with ./scripts/use-manifest.sh firefox" -ForegroundColor Green
+} else {
+    Write-Host "[+] manifest.json already present - leaving as-is" -ForegroundColor Green
+}
+
+# -----------------------------------------------------------
 # 2. Detect Node.js
 # -----------------------------------------------------------
 $NodeBin = $null

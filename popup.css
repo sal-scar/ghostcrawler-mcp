@@ -373,3 +373,82 @@ h2 {
   overflow-x: auto;
   line-height: 1.6;
 }
+
+.role-input {
+  flex: 1;
+  min-width: 120px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(10, 12, 14, 0.8);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.role-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(10, 12, 14, 0.5);
+  margin-top: 6px;
+}
+
+.session-row__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.session-row__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--muted);
+}
+
+.session-row__name {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-row__role {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.session-row__remove {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+.session-row__remove:hover {
+  color: #f87171;
+}
+
+.session-row.is-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
