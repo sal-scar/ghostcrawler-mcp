@@ -1073,7 +1073,7 @@ async function runDoctor() {
   // This check always bypasses the userStopActive kill-switch: it's a pure
   // connectivity probe (get_url), not a scan action, so a previous STOP click
   // must never make the extension look broken when it's actually fine.
-  if (polling) {
+    if (polling && scanState.status !== "scanning") {
     try {
       const t0 = Date.now();
       const r = await sendExtensionCommand("get_url", {}, 5000, { bypassStopGuard: true });
@@ -1082,6 +1082,12 @@ async function runDoctor() {
       checks.push({ name: "Extension roundtrip", status: "✗", detail: e?.message || "timeout" });
       if (!suggestedFix) suggestedFix = "Extension is polling but not responding to commands. Reload extension at chrome://extensions.";
     }
+    } else if (polling && scanState.status === "scanning") {
+      checks.push({
+        name: "Extension roundtrip",
+        status: "⚠",
+        detail: "skipped while active scan is running (extension command channel busy)",
+      });
   } else {
     checks.push({ name: "Extension roundtrip", status: "—", detail: "skipped (extension not polling)" });
   }
@@ -1727,6 +1733,12 @@ async function sendRequestThroughBurp(
   headers: Record<string, string> = {},
   body?: string
 ): Promise<{ status: number; headers: any; body: string }> {
+  // Keep the workflow visibly live: every proxied pentest request is mirrored
+  // by browser navigation so the tester can watch activity in real time.
+  if (/^https?:\/\//i.test(url)) {
+    liveShow(url);
+  }
+
   const { HttpsProxyAgent } = await import("https-proxy-agent");
   const proxyUrl = new URL(BURP_PROXY);
   const agent = new HttpsProxyAgent({
@@ -2538,6 +2550,10 @@ async function fetchDirect(
   url: string,
   extraHeaders: Record<string, string> = {}
 ): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+  if (/^https?:\/\//i.test(url)) {
+    liveShow(url);
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -3973,31 +3989,53 @@ async function checkSSRF(url: string, extraUrls: string[] = []): Promise<Passive
 
           // Indicators of SSRF success
           const body = r.body || "";
-          const isSSRF =
-            // AWS metadata fields
-            /ami-id|instance-id|instance-type|local-ipv4|public-ipv4|security-credentials/i.test(body) ||
-            // GCP metadata
-            /computeMetadata|serviceAccounts|access_token/i.test(body) ||
-            // /etc/passwd
-            /root:.*:0:0:|\/bin\/bash|\/bin\/sh/.test(body) ||
-            // /etc/hosts
-            /127\.0\.0\.1\s+localhost/.test(body) ||
-            // Redis
-            /\+OK|redis_version|connected_clients/i.test(body) ||
-            // Connection refused to internal port means server is making the request
-            (r.status === 500 && /connection refused|ECONNREFUSED|connect timeout/i.test(body));
+          const reflectedVariants = new Set<string>([
+            ssrfPayload.value,
+            encodeURIComponent(ssrfPayload.value),
+            encodeURI(ssrfPayload.value),
+          ]);
+          let bodySansReflection = body;
+          for (const v of reflectedVariants) {
+            if (v) bodySansReflection = bodySansReflection.split(v).join("");
+          }
 
-          if (isSSRF) {
+          const hasStrongSignal =
+            // Metadata-shaped response values not equal to raw payload text
+            /ami-id|instance-id|instance-type|local-ipv4|public-ipv4/i.test(bodySansReflection) ||
+            /serviceAccounts|access_token/i.test(bodySansReflection) ||
+            // /etc/passwd
+            /root:.*:0:0:|\/bin\/bash|\/bin\/sh/.test(bodySansReflection) ||
+            // /etc/hosts
+            /127\.0\.0\.1\s+localhost/.test(bodySansReflection) ||
+            // Redis
+            /\+OK|redis_version|connected_clients/i.test(bodySansReflection);
+
+          // Weak network-error hints can be noisy, so keep them as potential only.
+          const hasWeakSignal =
+            r.status >= 500 &&
+            /connection refused|ECONNREFUSED|connect timeout|EHOSTUNREACH|ENOTFOUND/i.test(bodySansReflection);
+
+          if (hasStrongSignal) {
             const excerpt = body.slice(0, 300).replace(/\s+/g, " ");
             findings.push({
               type: "SSRF (Server-Side Request Forgery)",
-              severity: /passwd|credentials|access_token|serviceAccount/i.test(body) ? "Critical" : "High",
+              severity: /root:.*:0:0:|access_token|serviceAccounts/i.test(bodySansReflection) ? "Critical" : "High",
               endpoint: `GET ${probeUrl.toString()}`,
               param,
               payload: ssrfPayload.value,
               evidence: `Parameter '${param}' caused the server to fetch '${ssrfPayload.label}'. Response excerpt: "${excerpt}"`,
             });
             break; // One confirmed SSRF per param is enough
+          } else if (hasWeakSignal) {
+            const excerpt = body.slice(0, 220).replace(/\s+/g, " ");
+            findings.push({
+              type: "Potential SSRF (Network Error Signal)",
+              severity: "Medium",
+              endpoint: `GET ${probeUrl.toString()}`,
+              param,
+              payload: ssrfPayload.value,
+              evidence: `Server returned an internal fetch-like error while handling '${param}', but no direct internal-data indicator was observed. Excerpt: "${excerpt}"`,
+            });
           }
         } catch {
           // ignore — connection failures are expected for most probes
@@ -5928,7 +5966,16 @@ async function _executeAutoCrawlInner(rawInput: AutoCrawlOptions = {}) {
     // Burp scanner pull is optional
   }
 
-  return {
+    const nextActions = buildNextStepRecommendations({
+      activeUrl,
+      findings: mergedFindings,
+      discoveredSurfaces: discoveredSurfaces.length,
+      discoveredEndpoints: discoveredEndpoints.size,
+      hasForms: Boolean((activeSurface?.forms || []).length),
+      hasButtons: Boolean((activeSurface?.buttons || []).length),
+    });
+
+    return {
     phases: ["scan-features", "attack-features"],
     attackGuideline: skillPlan.guideline,
     owaspCoverage: {
@@ -5948,6 +5995,7 @@ async function _executeAutoCrawlInner(rawInput: AutoCrawlOptions = {}) {
       ui: skillPlan.ui,
       api: skillPlan.api,
     },
+      nextActions,
     serverTech: serverTechFindings,
     findings: mergedFindings,
     pocs: mergedFindings
@@ -5958,6 +6006,7 @@ async function _executeAutoCrawlInner(rawInput: AutoCrawlOptions = {}) {
       highOrCritical: mergedFindings.filter((finding: any) => /high|critical/i.test(finding.severity)).length,
       serverTechDetected: serverTechFindings.map((f) => f.name),
       burpScannerIssues: burpScannerIssues.length,
+        nextBestAction: nextActions[0]?.title || "Review findings and continue targeted testing",
       bySeverity: {
         critical: mergedFindings.filter((f: any) => /critical/i.test(f.severity)).length,
         high: mergedFindings.filter((f: any) => /^high$/i.test(f.severity)).length,
@@ -5968,6 +6017,113 @@ async function _executeAutoCrawlInner(rawInput: AutoCrawlOptions = {}) {
     },
   };
 }
+
+  interface NextActionRecommendation {
+    priority: number;
+    title: string;
+    reason: string;
+    suggestedTool: string;
+    suggestedInput: string;
+  }
+
+  function buildNextStepRecommendations(input: {
+    activeUrl: string;
+    findings: Array<{ type?: string; severity?: string; endpoint?: string; evidence?: string }>;
+    discoveredSurfaces: number;
+    discoveredEndpoints: number;
+    hasForms: boolean;
+    hasButtons: boolean;
+  }): NextActionRecommendation[] {
+    const out: NextActionRecommendation[] = [];
+    const findings = input.findings || [];
+    const findingTypes = findings.map((f) => String(f.type || "").toLowerCase());
+
+    const hasHighRisk = findings.some((f) => /critical|high/i.test(String(f.severity || "")));
+    const hasPotentialSSRF = findingTypes.some((t) => /potential ssrf|ssrf/.test(t));
+    const hasAccessControlSignals = findingTypes.some((t) => /idor|access control|auth bypass|bola|bfla/.test(t));
+    const hasCveExposure = findingTypes.some((t) => /public cve exposure|confirmed public cve exploit/.test(t));
+
+    if (input.discoveredSurfaces === 0 || (!input.hasForms && input.discoveredEndpoints === 0)) {
+      out.push({
+        priority: 1,
+        title: "Stabilize attack-surface discovery first",
+        reason: "Scan produced weak discovery context; active exploitation without forms/endpoints can be misleading.",
+        suggestedTool: "get_attack_surface",
+        suggestedInput: "{}",
+      });
+      out.push({
+        priority: 2,
+        title: "Run connection diagnostics before retest",
+        reason: "Confirms extension roundtrip and capture pipeline before another full run.",
+        suggestedTool: "gc_doctor",
+        suggestedInput: "{}",
+      });
+    }
+
+    if (hasAccessControlSignals || input.discoveredEndpoints > 0) {
+      out.push({
+        priority: 3,
+        title: "Run cross-role authorization matrix",
+        reason: "Access-control issues are high-value and quickly validate BOLA/BFLA drift across roles.",
+        suggestedTool: "run_access_matrix",
+        suggestedInput: '{"methods":["GET","POST"],"maxEndpoints":12}',
+      });
+    }
+
+    if (input.hasForms) {
+      out.push({
+        priority: 4,
+        title: "Execute targeted form exploitation sequence",
+        reason: "With form fields present, reflected/stored XSS and SQLi checks become high-signal and reproducible.",
+        suggestedTool: "run_attack_command",
+        suggestedInput: '{"attack":"xss","observeMs":2000}',
+      });
+    }
+
+    if (hasPotentialSSRF) {
+      out.push({
+        priority: 5,
+        title: "Manually confirm SSRF candidates",
+        reason: "Potential SSRF/network-error signals require proof of internal data access before reporting as confirmed.",
+        suggestedTool: "run_attack_command",
+        suggestedInput: '{"attack":"custom-request","method":"GET","url":"' + input.activeUrl + '?url=http://169.254.169.254/latest/meta-data/"}',
+      });
+    }
+
+    if (hasCveExposure) {
+      out.push({
+        priority: 6,
+        title: "Validate exposed CVE path with controlled probe",
+        reason: "Version exposure alone is not exploit proof; controlled reproduction separates potential from confirmed.",
+        suggestedTool: "run_attack_command",
+        suggestedInput: '{"attack":"custom-request","method":"GET","url":"' + input.activeUrl + '"}',
+      });
+    }
+
+    if (!hasHighRisk && input.discoveredEndpoints > 0 && !input.hasForms && input.hasButtons) {
+      out.push({
+        priority: 7,
+        title: "Drive more app state to unlock hidden endpoints",
+        reason: "Low findings with button-rich UI often means flows were not fully exercised yet.",
+        suggestedTool: "run_browser_plan",
+        suggestedInput: '{"steps":[{"action":"click","selector":"button"}],"startLiveScan":true}',
+      });
+    }
+
+    if (!out.length) {
+      out.push({
+        priority: 1,
+        title: "Continue targeted validation of current findings",
+        reason: "No single blocker detected; proceed by confirming impact and reproducibility for top findings.",
+        suggestedTool: "report_finding",
+        suggestedInput: '{"type":"Validated Finding","severity":"Medium","endpoint":"' + input.activeUrl + '"}',
+      });
+    }
+
+    return out
+      .sort((a, b) => a.priority - b.priority)
+      .slice(0, 6);
+  }
 
 function rolePrivilegeRank(role: string): number {
   const r = normalizeRoleName(role);
@@ -6165,7 +6321,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "run_browser_plan",
-        description: "Execute browser actions (navigate/type/click/extract_text) on the active tab, optionally followed by a live scan.",
+        description: "Execute browser actions (navigate/type/click/extract_text/scroll) on the active tab, optionally followed by a live scan.",
         inputSchema: {
           type: "object",
           properties: {
@@ -6176,11 +6332,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 properties: {
                   action: {
                     type: "string",
-                    enum: ["click", "type", "navigate", "extract_text"],
+                    enum: ["click", "type", "navigate", "extract_text", "scroll"],
                   },
                   selector: { type: "string" },
                   text: { type: "string" },
                   url: { type: "string" },
+                  amount: { type: "number", description: "Scroll amount in pixels (for action=scroll)" },
+                  direction: { type: "string", enum: ["up", "down"], description: "Scroll direction (for action=scroll)" },
+                  to: { type: "string", enum: ["top", "bottom"], description: "Jump scroll target (for action=scroll)" },
+                  behavior: { type: "string", enum: ["smooth", "auto"], description: "Scroll behavior (for action=scroll)" },
                 },
                 required: ["action"],
               },
@@ -6528,6 +6688,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             selector: input.selector,
             text: input.text,
             url: input.url,
+            amount: input.amount,
+            direction: input.direction,
+            to: input.to,
+            behavior: input.behavior,
           },
           commandId,
         };
@@ -6595,6 +6759,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               selector: step.selector,
               text: step.text,
               url: step.url,
+              amount: step.amount,
+              direction: step.direction,
+              to: step.to,
+              behavior: step.behavior,
             },
             commandId,
           };
@@ -7038,6 +7206,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               throw new Error("Missing url for request-based attack");
             }
 
+            // Even request-based attacks should be visible live in the browser.
+            liveShow(requestUrl);
+
             const requestMethod = String(input.method || "GET").toUpperCase();
             const requestResult = await sendExtensionCommand("browser_action", {
               action: "request",
@@ -7114,13 +7285,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "pentest_active_tab": {
+        // Explicit user start should always clear a previous STOP guard.
+        // Otherwise get_url can never be delivered and repeatedly times out.
+        userStopActive = false;
+
         // 1. Auto-detect URL from active tab
         let activeUrl = "";
         try {
           let lastErr: any = null;
           for (let attempt = 1; attempt <= 3; attempt++) {
             try {
-              const r = await sendExtensionCommand("get_url", {}, 8000);
+              const r = await sendExtensionCommand("get_url", {}, 8000, { bypassStopGuard: true });
               activeUrl = String(r?.url || r?.result?.url || "");
               if (activeUrl) break;
             } catch (e: any) {
@@ -7128,6 +7303,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 350));
             }
           }
+
+          // Conservative fallback: only reuse attack-surface URL when it was
+          // captured very recently. Prevents scanning the wrong target if user
+          // has switched tabs/sites and get_url is currently flaky.
+          const surfaceUrl = String(currentAttackSurface?.scan?.page?.url || "");
+          const surfaceTs = Number(new Date(String(currentAttackSurface?.timestamp || 0)).getTime() || 0);
+          const surfaceAgeMs = surfaceTs > 0 ? Date.now() - surfaceTs : Number.POSITIVE_INFINITY;
+          const MAX_FALLBACK_SURFACE_AGE_MS = 45_000;
+          if (!activeUrl && /^https?:/i.test(surfaceUrl) && surfaceAgeMs <= MAX_FALLBACK_SURFACE_AGE_MS) {
+            activeUrl = surfaceUrl;
+            console.error(`[pentest_active_tab] get_url timed out, using recent fallback URL from attack-surface (${Math.round(surfaceAgeMs / 1000)}s old): ${activeUrl}`);
+          }
+
           if (!activeUrl) throw lastErr || new Error("Timeout waiting for get_url");
         } catch (e: any) {
           // Auto-run doctor so the user sees the actual broken layer
