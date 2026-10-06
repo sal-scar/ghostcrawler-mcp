@@ -81,7 +81,18 @@ type SessionRoleMeta = {
   cookieStoreId: string;
   updatedAt?: number;
 };
-let sessionRoleRegistry: Record<string, SessionRoleMeta> = {};
+// Persisted to disk because the extension only re-pushes this registry when
+// the popup is opened or a role is (re)assigned — without a file backup, a
+// server restart silently wipes all assigned roles until the user notices.
+const SESSION_ROLE_FILE = "/tmp/gc-session-roles.json";
+let sessionRoleRegistry: Record<string, SessionRoleMeta> = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(SESSION_ROLE_FILE, "utf8"));
+  } catch { return {}; }
+})();
+function _saveSessionRolesToDisk(): void {
+  try { fs.writeFileSync(SESSION_ROLE_FILE, JSON.stringify(sessionRoleRegistry)); } catch { /* non-critical */ }
+}
 let activeSessionCookieStoreId = "";
 
 // ── Wire-request capture from the browser extension ──
@@ -204,11 +215,13 @@ function bindScanStateToSession(cookieStoreId?: string): void {
   scanStateByCookieStore.set(id, scanState);
 }
 
-function getScanStateForRequest(req: any): ScanProgress {
-  const id = resolveSessionCookieStoreId(req);
-  if (id && scanStateByCookieStore.has(id)) {
-    return scanStateByCookieStore.get(id)!;
-  }
+// The HUD must always read the SAME object that pushVuln()/logActivity()/
+// setPhase() mutate — which is the global `scanState`. The per-cookieStore map
+// only ever held stale snapshots (scanState is reassigned to a fresh object on
+// each new scan, leaving old references behind), so reading from it made the
+// HUD show 0 findings while findings landed in the live global object. Always
+// return the live global state; there is only one active scan server-wide.
+function getScanStateForRequest(_req: any): ScanProgress {
   return scanState;
 }
 
@@ -423,6 +436,7 @@ app.post("/ghostcrawler/session-registry", (req, res) => {
     if (activeMeta?.containerName) lastExtensionContainer = activeMeta.containerName;
   }
 
+  _saveSessionRolesToDisk();
   res.json({ ok: true, roles: Object.keys(sessionRoleRegistry).length, activeCookieStoreId: activeSessionCookieStoreId || null });
 });
 
@@ -585,9 +599,17 @@ async function waitForCommandResult(commandId: string, timeoutMs = 15000) {
   return null;
 }
 
-async function sendExtensionCommand(type: string, payload: any = {}, timeoutMs = 15000) {
-  if (userStopActive) {
+async function sendExtensionCommand(type: string, payload: any = {}, timeoutMs = 15000, opts: { bypassStopGuard?: boolean } = {}) {
+  if (userStopActive && !opts.bypassStopGuard) {
     throw new Error("Stopped by user — start a new scan to resume");
+  }
+  // Any real navigation (not just liveShow()-queued ones) causes the content
+  // script to tear down and re-inject, which pauses heartbeats for a few
+  // seconds. The heartbeat watchdog must treat this as expected — otherwise
+  // a slow page load (heavy JS, embedded iframes) gets misread as "extension
+  // disconnected" and silently aborts the whole scan.
+  if (type === "browser_action" && payload?.action === "navigate") {
+    _lastLiveShowMs = Date.now();
   }
   const commandId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   pendingResult = null;
@@ -692,22 +714,16 @@ app.post("/ghostcrawler/heartbeat", (req, res) => {
   res.json({ ok: true, ts: lastExtensionHeartbeat });
 });
 
-// Attack mode setting — "silent" (default) or "live"
-// silent: attacks fire through Burp proxy only; browser stays idle (faster)
-// live:   browser navigates to each attack URL so the user can watch exploits fire
-let _attackMode: "silent" | "live" = "silent";
-
+// GhostCrawler is a LIVE pentest agent by design: every attack navigates the
+// real browser so exploits are visible and fire in the actual DOM. There is no
+// silent mode. The settings endpoints remain as no-op stubs so older extension
+// builds that still POST an attackMode don't error.
 app.get("/ghostcrawler/settings", (_req, res) => {
-  res.json({ attackMode: _attackMode });
+  res.json({ attackMode: "live" });
 });
 
-app.post("/ghostcrawler/settings", (req, res) => {
-  const mode = req.body?.attackMode;
-  if (mode === "silent" || mode === "live") {
-    _attackMode = mode;
-    console.error(`[Settings] attackMode = ${_attackMode}`);
-  }
-  res.json({ attackMode: _attackMode });
+app.post("/ghostcrawler/settings", (_req, res) => {
+  res.json({ attackMode: "live" });
 });
 // Builds a raw HTTP request from the finding's endpoint and pushes it to
 // Burp via the Burp MCP create_repeater_tab tool.
@@ -1054,10 +1070,13 @@ async function runDoctor() {
   }
 
   // 4. Extension roundtrip (only if polling looks alive — avoid 12s wait when dead)
+  // This check always bypasses the userStopActive kill-switch: it's a pure
+  // connectivity probe (get_url), not a scan action, so a previous STOP click
+  // must never make the extension look broken when it's actually fine.
   if (polling) {
     try {
       const t0 = Date.now();
-      const r = await sendExtensionCommand("get_url", {}, 5000);
+      const r = await sendExtensionCommand("get_url", {}, 5000, { bypassStopGuard: true });
       checks.push({ name: "Extension roundtrip", status: "✓", detail: `${Date.now() - t0}ms — url=${String(r?.url || r?.result?.url || "(unknown)").slice(0, 80)}` });
     } catch (e: any) {
       checks.push({ name: "Extension roundtrip", status: "✗", detail: e?.message || "timeout" });
@@ -1065,6 +1084,26 @@ async function runDoctor() {
     }
   } else {
     checks.push({ name: "Extension roundtrip", status: "—", detail: "skipped (extension not polling)" });
+  }
+
+  // 4b. Scan kill-switch — a previous STOP click (or scan-stop call) sets a
+  // server-side flag that blocks every browser/scan tool until a new scan is
+  // started. This is independent of extension/browser health, so surface it
+  // as its own check instead of letting it masquerade as "extension roundtrip
+  // failed/stopped". Self-heal it here: if the roundtrip above just proved the
+  // extension is alive and responsive, there is no reason to keep blocking —
+  // clear it so the next tool call works without forcing a full new scan.
+  if (userStopActive) {
+    const roundtripOk = checks.some(c => c.name === "Extension roundtrip" && c.status === "✓");
+    if (roundtripOk) {
+      userStopActive = false;
+      checks.push({ name: "Scan kill-switch", status: "✓", detail: "was active from a previous STOP — cleared automatically (extension confirmed healthy)" });
+    } else {
+      checks.push({ name: "Scan kill-switch", status: "⚠", detail: "active from a previous STOP — left in place because extension roundtrip did not confirm healthy" });
+      if (!suggestedFix) suggestedFix = "A previous STOP click is still blocking scans, and the extension roundtrip failed too. Fix the extension/browser connection first, then run gc_doctor again to auto-clear the kill-switch.";
+    }
+  } else {
+    checks.push({ name: "Scan kill-switch", status: "✓", detail: "not active" });
   }
 
   // 5. Burp MCP
@@ -1254,11 +1293,9 @@ async function sendAttackRequest(
     headers["Content-Type"] = "application/x-www-form-urlencoded";
   }
 
-  // Show every attack live in the browser when in "live" mode.
-  // In "silent" mode (default), attacks run quietly through Burp — faster.
-  if (_attackMode === "live") {
-    liveShow(requestUrl);
-  }
+  // Always show every attack live in the browser — GhostCrawler has no silent
+  // mode; the whole point is watching exploits fire in the real DOM.
+  liveShow(requestUrl);
 
   return sendRequestThroughBurp(upperMethod, requestUrl, headers, body);
 }
@@ -4125,13 +4162,14 @@ async function executeAutoCrawl(rawInput: AutoCrawlOptions = {}) {
   });
 
   // Heartbeat watchdog: extension pings /ghostcrawler/heartbeat every 2s.
-  // Fires only when heartbeat is stale AND no liveShow() navigation was queued
-  // recently (nav queue drainer causes the content script to reload, dropping
-  // heartbeats temporarily — that is expected and should not abort the scan).
+  // Fires only when heartbeat is stale AND no navigation (liveShow()-queued or
+  // a direct browser_action navigate) happened recently — a real page load
+  // with heavy JS/embedded iframes can pause heartbeats for several seconds,
+  // and that is expected, not a disconnect.
   lastExtensionHeartbeat = Date.now();
   const HEARTBEAT_GRACE_MS = 6000;
-  const HEARTBEAT_STALE_MS = 15000;    // stale threshold (content script alive check)
-  const NAV_GRACE_MS = 12000;          // ignore stale heartbeat for 12s after any liveShow()
+  const HEARTBEAT_STALE_MS = 20000;    // stale threshold (content script alive check)
+  const NAV_GRACE_MS = 18000;          // ignore stale heartbeat for 18s after any navigation
   const heartbeatStartedAt = Date.now();
   const heartbeatTimer = setInterval(() => {
     if (Date.now() - heartbeatStartedAt < HEARTBEAT_GRACE_MS) return;
@@ -5062,29 +5100,43 @@ async function _executeAutoCrawlInner(rawInput: AutoCrawlOptions = {}) {
       payload,
     }, 8000);
 
-    // Submit form via MCP → Burp so the attack request is guaranteed in Burp history.
-    // Falls back to a direct click if the proxy endpoint is unreachable.
+    // Submit the form. GhostCrawler is a LIVE agent, so prefer a real visible
+    // browser submit (click/Enter) — the browser is proxied through Burp, so the
+    // request is still logged. Only fall back to the invisible MCP→Burp submit
+    // when there's no usable submit control or the visible submit did nothing.
     let submitted = false;
-    try {
-      const mcpResult = await sendExtensionCommand("browser_action", {
-        action: "submit_form_via_mcp",
-        targetSelector,
-      }, 10000);
-      submitted = !!mcpResult?.ok || !!mcpResult?.result?.ok;
-    } catch { /* fall through to click fallback */ }
 
-    if (!submitted) {
+    if (submitSelector) {
       try {
         await sendExtensionCommand("browser_action", { action: "click", selector: submitSelector }, 8000);
-      } catch {
-        try {
-          await sendExtensionCommand("browser_action", {
-            action: "type",
-            selector: targetSelector,
-            text: "\n",
-          }, 5000);
-        } catch { /* skip */ }
-      }
+        await new Promise((r) => setTimeout(r, settleMs));
+        submitted = true;
+      } catch { /* fall through */ }
+    }
+
+    if (!submitted) {
+      // No submit button — try pressing Enter in the target field (visible).
+      try {
+        await sendExtensionCommand("browser_action", {
+          action: "type",
+          selector: targetSelector,
+          text: "\n",
+        }, 5000);
+        await new Promise((r) => setTimeout(r, settleMs));
+        submitted = true;
+      } catch { /* fall through */ }
+    }
+
+    // Reliability fallback: if nothing visibly submitted, guarantee the attack
+    // request still reaches Burp via the MCP proxy path.
+    if (!submitted) {
+      try {
+        const mcpResult = await sendExtensionCommand("browser_action", {
+          action: "submit_form_via_mcp",
+          targetSelector,
+        }, 10000);
+        submitted = !!mcpResult?.ok || !!mcpResult?.result?.ok;
+      } catch { /* give up — state capture below will reflect no change */ }
     }
     await new Promise((r) => setTimeout(r, settleMs));
 
@@ -5792,11 +5844,26 @@ async function runAccessMatrix(rawArgs: any = {}) {
   const endpoints = buildAccessMatrixEndpoints(origin, Number(rawArgs?.maxEndpoints || 12));
   if (!endpoints.length) throw new Error("No same-origin endpoints available for access matrix.");
 
+  // Reflect progress in scanState so the HUD shows "scanning" instead of a
+  // stale idle/completed status while the matrix runs (it has no attack
+  // surface loop of its own, so it never touched scanState before).
+  bindScanStateToSession(activeSessionCookieStoreId || lastExtensionCookieStoreId);
+  scanState.status = "scanning";
+  scanState.progress = 0;
+  const totalChecks = endpoints.length * methods.length;
+  let completedChecks = 0;
+  logActivity(`Access matrix starting: roles=${roleTargets.map((r) => r.role).join(", ")}, ${totalChecks} check(s)`);
+
   const matrix: any[] = [];
   const findings: any[] = [];
 
   for (const url of endpoints) {
     for (const method of methods) {
+      scanState.currentTest = `Access matrix: ${method} ${url}`;
+      // Always show each checked endpoint live in the browser — this loop only
+      // fires background "request" actions otherwise, which never navigate the
+      // tab, so without this the matrix would run invisibly.
+      liveShow(url);
       const statuses: Record<string, number> = {};
       for (const target of roleTargets) {
         try {
@@ -5819,12 +5886,17 @@ async function runAccessMatrix(rawArgs: any = {}) {
       matrix.push({ method, url, statuses });
       const uniqueStatuses = Array.from(new Set(Object.values(statuses)));
       if (uniqueStatuses.length > 1) {
-        findings.push({
+        const finding = {
           type: "Differential Access Response",
           severity: "Medium",
           endpoint: `${method} ${url}`,
+          param: "",
+          payload: "",
           evidence: JSON.stringify(statuses),
-        });
+        };
+        findings.push(finding);
+        pushVuln(finding);
+        sendFindingToBurp(finding.severity, finding.type, method, url, {}, undefined).catch(() => {});
       }
 
       const path = new URL(url).pathname.toLowerCase();
@@ -5832,18 +5904,30 @@ async function runAccessMatrix(rawArgs: any = {}) {
       if (sensitivePath) {
         for (const [role, status] of Object.entries(statuses)) {
           if (rolePrivilegeRank(role) < 70 && status >= 200 && status < 300) {
-            findings.push({
+            const finding = {
               type: "Potential BFLA/BOLA",
               severity: "High",
               endpoint: `${method} ${url}`,
               param: role,
+              payload: "",
               evidence: `${role} received HTTP ${status} on sensitive path ${path}`,
-            });
+            };
+            findings.push(finding);
+            pushVuln(finding);
+            sendFindingToBurp(finding.severity, finding.type, method, url, {}, undefined).catch(() => {});
           }
         }
       }
+
+      completedChecks++;
+      scanState.progress = Math.round((completedChecks / totalChecks) * 100);
     }
   }
+
+  scanState.status = "completed";
+  scanState.progress = 100;
+  scanState.currentTest = `Access matrix complete — ${findings.length} finding(s)`;
+  logActivity(`Access matrix complete — ${findings.length} finding(s) across ${matrix.length} check(s)`);
 
   return {
     ok: true,
@@ -6761,12 +6845,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               throw new Error("Missing url for request-based attack");
             }
 
+            const requestMethod = String(input.method || "GET").toUpperCase();
             const requestResult = await sendExtensionCommand("browser_action", {
               action: "request",
               url: requestUrl,
-              method: String(input.method || "GET").toUpperCase(),
+              method: requestMethod,
               headers: input.headers || {},
-              body: input.body || "",
+              body: ["GET", "HEAD"].includes(requestMethod) ? undefined : (input.body || ""),
             }, timeoutMs);
 
             attacks.mode = attack;

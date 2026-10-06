@@ -74,9 +74,7 @@
   };
 
   const loadMCPSettings = async () => {
-    // Load and apply the stored attack mode
-    const { attackMode } = await storageGet(["attackMode"]);
-    applyAttackMode(attackMode || "silent");
+    // GhostCrawler is always live — no attack-mode setting to load.
   };
 
   const ensureMcpEnabled = async () => {
@@ -90,39 +88,6 @@
     // Nudge background in case the service worker was suspended.
     try { await runtimeApi.runtime.sendMessage({ type: "ghostcrawler:ping" }); } catch {}
   };
-
-  const applyAttackMode = (mode) => {
-    const btn = document.getElementById("attackModeToggle");
-    const desc = document.getElementById("attackModeDesc");
-    if (!btn) return;
-    if (mode === "live") {
-      btn.textContent = "Live 👁";
-      btn.style.background = "#7c3aed";
-      btn.style.borderColor = "#7c3aed";
-      if (desc) desc.textContent = "Browser navigates to each attack URL";
-    } else {
-      btn.textContent = "Silent";
-      btn.style.background = "";
-      btn.style.borderColor = "";
-      if (desc) desc.textContent = "Attacks run via Burp proxy only";
-    }
-  };
-
-  document.getElementById("attackModeToggle")?.addEventListener("click", async () => {
-    const { attackMode } = await storageGet(["attackMode"]);
-    const next = (attackMode || "silent") === "silent" ? "live" : "silent";
-    await runtimeApi.storage.local.set({ attackMode: next });
-    applyAttackMode(next);
-    // Push to MCP server so current scan picks it up immediately
-    try {
-      const serverUrl = await getMcpUrl();
-      await fetch(`${serverUrl}/ghostcrawler/settings`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ attackMode: next }),
-      });
-    } catch { /* server may be down — setting is saved locally regardless */ }
-  });
 
   const showMcpMessage = (text, ok) => {
     const el = document.getElementById("wizardStatus");
@@ -395,19 +360,6 @@
   });
 
   refreshWizardVisibility();
-
-  // On popup open: sync stored attack mode to the server so it's always current
-  setTimeout(async () => {
-    try {
-      const { attackMode } = await storageGet(["attackMode"]);
-      const serverUrl = await getMcpUrl();
-      await fetch(`${serverUrl}/ghostcrawler/settings`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ attackMode: attackMode || "silent" }),
-      });
-    } catch { /* ignore — server may not be running yet */ }
-  }, 300);
 
   // Auto-start polling if a scan might be running
   setTimeout(async () => {

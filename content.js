@@ -1,17 +1,28 @@
 (function () {
   const runtimeApi = globalThis.browser || globalThis.chrome;
 
+  // Cross-browser runtime.sendMessage. On native Firefox, passing a callback as
+  // the 2nd arg is INVALID (it's treated as `options`, which must be an object)
+  // and throws synchronously — silently breaking HUD buttons. Calling without a
+  // callback returns a Promise on both Chrome MV3 and Firefox, so always use it.
+  const sendRuntimeMessage = (msg) => {
+    try {
+      const p = runtimeApi.runtime.sendMessage(msg);
+      return p && typeof p.then === "function" ? p : Promise.resolve(p);
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  };
+
   const storageGet = (keys) => new Promise((resolve) => runtimeApi.storage.local.get(keys, resolve));
   const storageSet = (value) => new Promise((resolve) => runtimeApi.storage.local.set(value, resolve));
   const getRoleContext = () => new Promise((resolve) => {
-    try {
-      runtimeApi.runtime.sendMessage({ type: "ghostcrawler:get-role-context" }, (resp) => {
+    sendRuntimeMessage({ type: "ghostcrawler:get-role-context" })
+      .then((resp) => {
         if (resp?.ok && resp.roleContext) resolve(resp.roleContext);
         else resolve({ role: "", cookieStoreId: "", containerName: "" });
-      });
-    } catch {
-      resolve({ role: "", cookieStoreId: "", containerName: "" });
-    }
+      })
+      .catch(() => resolve({ role: "", cookieStoreId: "", containerName: "" }));
   });
 
   // Guard: skip expensive re-initialization (fetch/XHR hooks, timers) if already
@@ -115,26 +126,23 @@
       const prev = btn.textContent;
       btn.disabled = true;
       btn.textContent = "Sending…";
-      try {
-        runtimeApi.runtime.sendMessage(
-          { type: "ghostcrawler:send-to-burp", serverUrl: hudServerUrl, finding },
-          (response) => {
-            btn.disabled = false;
-            if (response && response.ok) {
-              btn.textContent = "✓ Burp";
-              btn.style.background = "#166534";
-              btn.style.borderColor = "#4ade80";
-              btn.style.color = "#bbf7d0";
-            } else {
-              btn.textContent = "✗ Failed";
-              setTimeout(() => { btn.textContent = prev; }, 2000);
-            }
+      sendRuntimeMessage({ type: "ghostcrawler:send-to-burp", serverUrl: hudServerUrl, finding })
+        .then((response) => {
+          btn.disabled = false;
+          if (response && response.ok) {
+            btn.textContent = "✓ Burp";
+            btn.style.background = "#166534";
+            btn.style.borderColor = "#4ade80";
+            btn.style.color = "#bbf7d0";
+          } else {
+            btn.textContent = "✗ Failed";
+            setTimeout(() => { btn.textContent = prev; }, 2000);
           }
-        );
-      } catch {
-        btn.disabled = false;
-        btn.textContent = prev;
-      }
+        })
+        .catch(() => {
+          btn.disabled = false;
+          btn.textContent = prev;
+        });
     });
 
     const stopButton = hudRoot.querySelector("#ghostcrawler-hud-stop");
@@ -167,14 +175,8 @@
         stopButton.style.opacity = "0.7";
         try {
           // Send via runtime to background.js (content scripts cannot fetch localhost reliably under CORS)
-          await new Promise((resolve) => {
-            try {
-              runtimeApi.runtime.sendMessage(
-                { type: "ghostcrawler:stop-scan", serverUrl: hudServerUrl },
-                (response) => resolve(response)
-              );
-            } catch { resolve(null); }
-          });
+          const resp = await sendRuntimeMessage({ type: "ghostcrawler:stop-scan", serverUrl: hudServerUrl }).catch(() => null);
+          if (resp && resp.ok === false) throw new Error("stop relay failed");
           stopButton.textContent = "⏹ STOPPED";
           stopButton.style.background = "#7f1d1d";
           stopButton.style.animation = "none";
@@ -944,10 +946,13 @@
           const requestUrl = payload.url || window.location.href;
           const method = String(payload.method || "GET").toUpperCase();
           const headers = payload.headers || {};
+          // fetch() throws "GET/HEAD cannot have a body" if body is anything but
+          // undefined/null — including an empty string — so it must be omitted
+          // entirely for those methods rather than just left falsy.
           const requestInit = {
             method,
             headers,
-            body: payload.body,
+            ...(!["GET", "HEAD"].includes(method) && payload.body != null ? { body: payload.body } : {}),
           };
 
           fetch(requestUrl, requestInit)
