@@ -5,7 +5,8 @@ description: >
   crawls attack surfaces, fires exploits through the browser so every request
   appears in Burp Suite Proxy History, and logs all findings automatically.
   Use for: authorized web pentesting, source code review, auth bypass, IDOR,
-  XSS, SQLi, default credential testing, OWASP Top 10, Burp logging.
+  XSS, SQLi, business logic abuse, race condition testing,
+  default credential testing, OWASP Top 10, Burp logging.
 argument-hint: 'target URL or command (e.g. pentest_active_tab, gc_doctor)'
 ---
 
@@ -100,6 +101,7 @@ Hidden API endpoints:
 | innerHTML = userInput | A03 | Inject img src=x onerror=alert(1) |
 | localStorage gate | A04 | Set key, navigate directly |
 | data.success drives navigation | A07 | Flip field via Burp Match+Replace |
+| checkout total controlled by client field | A04 | change price/discount/qty and resubmit |
 | Hardcoded JWT or API key | A02 | Test key against the API |
 | HTML comment with credentials | A05 | Try credentials on login |
 | ?id= with no server check | A01 | Enumerate id=1,2,3 (IDOR) |
@@ -302,6 +304,92 @@ run_browser_plan:
   -> page loads without redirect = no server session check (Critical)
 ```
 
+### Business Logic Abuse Playbook (A04)
+
+Workflow step-skip:
+```
+run_browser_plan:
+  navigate -> /checkout/shipping
+  navigate -> /checkout/review
+  navigate -> /checkout/confirm
+  -> order accepted without payment/verification step = High/Critical
+```
+
+Client-side amount tampering:
+```
+run_browser_plan:
+  navigate -> /checkout
+  type     -> input[name='price'] = '1'
+  type     -> input[name='discount'] = '100'
+  click    -> button[type='submit']
+  -> server accepts manipulated total = High/Critical
+```
+
+Coupon or promo re-use abuse:
+```
+run_browser_plan:
+  type  -> input[name='coupon'] = 'WELCOME50'
+  click -> button#apply-coupon
+  click -> button#apply-coupon
+  -> discount applies multiple times = High
+```
+
+Quantity / limit bypass:
+```
+run_browser_plan:
+  type  -> input[name='qty'] = '-1'      (or 999999)
+  click -> button[type='submit']
+  -> negative/overflow accepted = High
+```
+
+Cross-role process abuse:
+```
+run_access_matrix
+  -> lower role can execute admin workflow endpoint = Critical
+```
+
+Business logic finding checklist:
+
+- Must identify expected business rule (what should happen)
+- Must show actual behavior (what happened instead)
+- Must quantify impact (money, entitlement, inventory, approval bypass)
+
+### Race Condition Playbook (A04/A01)
+
+Goal: prove duplicate or out-of-order state changes by sending near-simultaneous requests.
+
+High-value race targets:
+
+- Wallet transfer / balance deduction
+- Coupon redemption / gift card consume
+- Refund or withdrawal actions
+- Password reset / one-time token redemption
+- Seat or stock reservation endpoints
+
+Race test flow:
+
+1. Use browser actions to reach the final pre-submit step.
+2. Capture the exact state-changing request in Burp Proxy.
+3. Replay the same request in parallel from Burp Repeater tabs.
+4. Confirm whether multiple requests succeed when only one should.
+5. Verify final state in the app (balance, order count, token status).
+
+Minimal reproduction pattern:
+```
+Request A: POST /api/redeem-coupon  code=WELCOME50
+Request B: POST /api/redeem-coupon  code=WELCOME50   (sent at same time)
+
+Expected: one success, one reject
+Vulnerable: both succeed and business state is double-applied
+```
+
+Race-condition evidence requirements:
+
+- Timestamps or request IDs showing near-simultaneous submissions
+- Two or more success responses where only one should be valid
+- Post-condition proof (duplicate credit, duplicate order, reused token)
+- Repeatability across at least two runs
+
 ### A02 - Cryptographic Failures
 
 Tool action:
@@ -451,6 +539,8 @@ code rules, then a **final severity** is gated by evidence confidence.
 | Client-side access control logic | **Medium** | **High** if bypass reaches privileged endpoint |
 | IDOR | **High** | **Critical** if sensitive data (PII, credentials) or admin-level access |
 | Auth bypass | **Critical** | — |
+| Business logic step-skip / rule bypass | **High** | **Critical** if payment, approval, or entitlement controls are bypassed |
+| Race condition (double-spend / double-apply) | **High** | **Critical** if monetary loss or account takeover is demonstrated |
 | SQLi (confirmed error or row return) | **Critical** | — |
 | XSS (confirmed DOM marker or cookie theft) | **High** | **Critical** after session hijack demonstrated |
 | Stored XSS | **Critical** | — |
