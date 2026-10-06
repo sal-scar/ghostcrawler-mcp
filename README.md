@@ -24,11 +24,10 @@ Invoke `ghostcrawler` to activate the skill, then `pentest_active_tab`. GhostCra
 - Scans page source for hidden vulnerabilities
 - Navigates the browser live to fire real exploits
 - Logs every request to **Burp Suite Proxy History + Repeater**
-- Chains auth bypass, IDOR, stored XSS - all visible in real time
 
-No black boxes. Every move is live in your browser and recorded in Burp.
+Every move is live in your browser and recorded in Burp.
 
-> **Browser support:** Chromium (Chrome, Edge, Brave) and Firefox.
+> **Browser support:** Chromium and Firefox.
 > Firefox mode includes **Session Roles** (multi-account role tagging using Firefox containers) for differential authorization testing.
 
 ---
@@ -39,9 +38,9 @@ This is a major release because core capability and behavior changed:
 
 - Adds Firefox support with manifest switching and runtime compatibility fixes
 - Adds multi-account testing via Firefox container-backed Session Roles
-- Reduces noisy Burp history with improved bridge logging flow
 - Fixes panic button behavior for cleaner emergency stop handling
 - Upgrades the GhostCrawler skills/playbook for stronger guided testing
+- Reduces noisy Burp history with improved bridge logging flow
 
 ---
 
