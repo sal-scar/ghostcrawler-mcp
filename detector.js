@@ -124,6 +124,15 @@
     return style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0";
   };
 
+  const isGhostcrawlerUi = (element) => {
+    if (!element || !element.closest) return false;
+    return Boolean(
+      element.closest("#ghostcrawler-live-hud") ||
+      element.closest("[id^='ghostcrawler-']") ||
+      element.closest("[class*='ghostcrawler']")
+    );
+  };
+
   const detectButtons = () => {
     // Primary selector for obvious interactive elements
     const primary = Array.from(document.querySelectorAll(
@@ -329,79 +338,233 @@
     return [...primary, ...secondary].filter(
       (el) =>
         isLikelyVisible(el) &&
+        !isGhostcrawlerUi(el) &&
         !el.matches(":disabled") &&
         el.getAttribute("aria-disabled") !== "true"
     );
   };
 
-  // Intercepts all form submit events so form submissions go through fetch
-  // instead of navigating the page. Attach at document capture level.
-  const makeSubmitInterceptor = () => async (e) => {
-    e.preventDefault();
-    const form = e.target;
-    const action = form.action || window.location.href;
-    const method = (form.method || "GET").toUpperCase();
-    const formData = new FormData(form);
-    const params = new URLSearchParams(formData).toString();
-    const url = method === "POST" ? action : `${action}${params ? "?" + params : ""}`;
-    const init = method === "POST"
-      ? { method: "POST", body: new URLSearchParams(formData), credentials: "include" }
-      : { credentials: "include" };
-    try { await fetch(url, init); } catch (_) {}
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const getDocumentScrollHeight = () => {
+    const doc = document.documentElement;
+    const body = document.body;
+    return Math.max(
+      doc ? doc.scrollHeight : 0,
+      body ? body.scrollHeight : 0,
+      doc ? doc.offsetHeight : 0,
+      body ? body.offsetHeight : 0
+    );
   };
 
-  // Trigger a single element: fetch link targets, click everything else.
-  // Form submissions are handled by the document-level submit interceptor.
+  const ensureSpaNavigationTracking = () => {
+    if (window.__ghostcrawlerNavTrackingInstalled) return;
+    window.__ghostcrawlerNavTrackingInstalled = true;
+    window.__ghostcrawlerNavSignal = Number(window.__ghostcrawlerNavSignal || 0);
+
+    const bumpSignal = () => {
+      window.__ghostcrawlerNavSignal = Number(window.__ghostcrawlerNavSignal || 0) + 1;
+    };
+
+    try {
+      const originalPushState = history.pushState;
+      history.pushState = function (...args) {
+        const result = originalPushState.apply(this, args);
+        bumpSignal();
+        return result;
+      };
+    } catch {}
+
+    try {
+      const originalReplaceState = history.replaceState;
+      history.replaceState = function (...args) {
+        const result = originalReplaceState.apply(this, args);
+        bumpSignal();
+        return result;
+      };
+    } catch {}
+
+    window.addEventListener("hashchange", bumpSignal);
+    window.addEventListener("popstate", bumpSignal);
+  };
+
+  const captureRouteState = () => ({
+    href: window.location.href,
+    pathname: window.location.pathname,
+    search: window.location.search,
+    hash: window.location.hash,
+    title: document.title,
+    navSignal: Number(window.__ghostcrawlerNavSignal || 0),
+  });
+
+  const diffRouteState = (before, after) => {
+    if (!before || !after) return { changed: false, reason: "unknown" };
+    if (after.href !== before.href) return { changed: true, reason: "href", url: after.href };
+    if (after.navSignal !== before.navSignal) return { changed: true, reason: "history-event", url: after.href };
+    if (after.pathname !== before.pathname || after.search !== before.search || after.hash !== before.hash) {
+      return { changed: true, reason: "route", url: after.href };
+    }
+    if (after.title !== before.title && after.title) {
+      return { changed: true, reason: "title", url: after.href };
+    }
+    return { changed: false, reason: "none", url: after.href };
+  };
+
+  const waitForRouteTransition = async (beforeState, timeoutMs = 5000) => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const afterState = captureRouteState();
+      const diff = diffRouteState(beforeState, afterState);
+      if (diff.changed) {
+        return { navigated: true, routeReason: diff.reason, url: diff.url };
+      }
+      await delay(120);
+    }
+    const latest = captureRouteState();
+    return { navigated: false, routeReason: "timeout", url: latest.href };
+  };
+
+  const waitForDomSettle = async (settleMs = 700, timeoutMs = 3500) => {
+    const target = document.body || document.documentElement;
+    if (!target) return;
+
+    let lastMutationAt = Date.now();
+    const observer = new MutationObserver(() => {
+      lastMutationAt = Date.now();
+    });
+
+    observer.observe(target, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+    });
+
+    const start = Date.now();
+    try {
+      while (Date.now() - start < timeoutMs) {
+        if (Date.now() - lastMutationAt >= settleMs) break;
+        await delay(120);
+      }
+    } finally {
+      observer.disconnect();
+    }
+  };
+
+  const collectButtonsWithScroll = async (delayPerStep = 160) => {
+    const startX = window.scrollX;
+    const startY = window.scrollY;
+    const seen = new Set();
+    const collected = [];
+    const stepPx = Math.max(450, Math.floor(window.innerHeight * 0.8));
+    const maxSteps = 30;
+
+    const captureCurrentViewport = () => {
+      const visible = getVisibleEnabledButtons();
+      for (const el of visible) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        collected.push(el);
+      }
+    };
+
+    captureCurrentViewport();
+    let lastHeight = getDocumentScrollHeight();
+
+    for (let i = 0; i < maxSteps; i++) {
+      const currentY = window.scrollY;
+      const maxY = Math.max(0, getDocumentScrollHeight() - window.innerHeight);
+      const nextY = Math.min(maxY, currentY + stepPx);
+
+      if (nextY <= currentY + 1) break;
+
+      window.scrollTo({ top: nextY, behavior: "auto" });
+      await delay(delayPerStep);
+      captureCurrentViewport();
+
+      const newHeight = getDocumentScrollHeight();
+      if (nextY >= maxY && newHeight <= lastHeight) break;
+      lastHeight = newHeight;
+    }
+
+    window.scrollTo({ top: startY, left: startX, behavior: "auto" });
+    await delay(delayPerStep);
+    captureCurrentViewport();
+
+    return collected;
+  };
+
+  // Trigger a single element with live browser interaction.
+  // This intentionally performs real clicks (including links/forms) to preserve
+  // session/cookie/browser behavior exactly as a user would.
   const triggerElement = async (el) => {
     const href = el.getAttribute("href") || "";
-    if (href && href !== "#" && !href.startsWith("javascript:")) {
-      const absoluteUrl = new URL(href, window.location.href).href;
-      const response = await fetch(absoluteUrl, { credentials: "include" });
-      return { method: "link-fetch", url: absoluteUrl, status: response.status };
-    }
+    const beforeState = captureRouteState();
+
     el.click();
-    return { method: "click" };
+
+    // Allow event handlers to run before checking route state.
+    await delay(200);
+
+    const nav = await waitForRouteTransition(beforeState, 5000);
+    await waitForDomSettle(700, 3000);
+
+    return {
+      method: href && href !== "#" && !href.startsWith("javascript:") ? "link-click" : "click",
+      url: nav.url,
+      navigated: nav.navigated,
+      routeReason: nav.routeReason,
+    };
   };
 
   const triggerButtons = async (delayMs = 700) => {
-    const elements = getVisibleEnabledButtons();
+    ensureSpaNavigationTracking();
+    const elements = await collectButtonsWithScroll();
     const results = [];
-    const submitInterceptor = makeSubmitInterceptor();
-    document.addEventListener("submit", submitInterceptor, { capture: true });
 
     for (const el of elements) {
+      const name = getVisibleText(el) || el.getAttribute("aria-label") || el.getAttribute("value") || "(unnamed)";
+      if (!document.contains(el)) {
+        results.push({
+          selector: getButtonSelector(el),
+          name,
+          method: "skip",
+          reason: "element-detached",
+          url: window.location.href,
+        });
+        continue;
+      }
+
       let outcome;
       try {
         outcome = await triggerElement(el);
       } catch (error) {
         outcome = { method: "error", error: String(error) };
       }
+
       results.push({
         selector: getButtonSelector(el),
-        name: getVisibleText(el) || el.getAttribute("aria-label") || el.getAttribute("value") || "(unnamed)",
+        name,
         ...outcome
       });
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+      await delay(delayMs);
     }
 
-    document.removeEventListener("submit", submitInterceptor, { capture: true });
-    return { triggered: results.length, results };
+    return { triggered: results.length, discovered: elements.length, results };
   };
 
   const triggerButtonByIndex = async (targetIndex) => {
-    const elements = getVisibleEnabledButtons();
+    ensureSpaNavigationTracking();
+    const elements = await collectButtonsWithScroll();
     const el = elements[targetIndex - 1];
     if (!el) return { ok: false, error: `No visible button at index ${targetIndex}` };
 
-    const submitInterceptor = makeSubmitInterceptor();
-    document.addEventListener("submit", submitInterceptor, { capture: true });
     try {
       const outcome = await triggerElement(el);
       return { ok: true, ...outcome };
     } catch (error) {
       return { ok: false, error: String(error) };
-    } finally {
-      document.removeEventListener("submit", submitInterceptor, { capture: true });
     }
   };
 

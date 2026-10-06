@@ -717,6 +717,45 @@
           return false;
         }
 
+        if (action === "scroll") {
+          const direction = String(payload.direction || "down").toLowerCase();
+          const behavior = String(payload.behavior || "smooth").toLowerCase() === "auto" ? "auto" : "smooth";
+          const amount = Number.isFinite(Number(payload.amount)) ? Math.max(0, Number(payload.amount)) : Math.max(300, Math.floor(window.innerHeight * 0.9));
+          const to = payload.to != null ? String(payload.to).toLowerCase() : "";
+
+          if (to === "top") {
+            window.scrollTo({ top: 0, behavior });
+          } else if (to === "bottom") {
+            const doc = document.documentElement;
+            const body = document.body;
+            const maxY = Math.max(
+              doc ? doc.scrollHeight : 0,
+              body ? body.scrollHeight : 0,
+              doc ? doc.offsetHeight : 0,
+              body ? body.offsetHeight : 0
+            );
+            window.scrollTo({ top: maxY, behavior });
+          } else {
+            const sign = direction === "up" ? -1 : 1;
+            window.scrollBy({ top: sign * amount, behavior });
+          }
+
+          sendResponse({
+            ok: true,
+            result: {
+              action,
+              direction,
+              amount,
+              to: to || null,
+              behavior,
+              scrollX: window.scrollX,
+              scrollY: window.scrollY,
+              url: window.location.href,
+            },
+          });
+          return false;
+        }
+
         if (action === "smart_fill_form") {
           // Fill all visible form fields with benign data, then inject payload into target field.
           // Ensures the form actually submits (passes required-field validation) so the server
